@@ -2,6 +2,7 @@ __author__ = 'rohe0002'
 
 import json
 import logging
+import six
 
 from urlparse import urlparse
 from bs4 import BeautifulSoup
@@ -101,7 +102,7 @@ class Interaction(object):
         self.who = "Form process"
 
     def pick_interaction(self, _base="", content="", req=None):
-        logger.info("pick_interaction baseurl: %s" % _base)
+        logger.info("pick_interaction baseurl: %s", _base)
         unic = content
         if content:
             _bs = BeautifulSoup(content)
@@ -112,11 +113,11 @@ class Interaction(object):
             _match = 0
             for attr, val in interaction["matches"].items():
                 if attr == "url":
-                    logger.info("matching baseurl against: %s" % val)
+                    logger.info("matching baseurl against: %s", val)
                     if val == _base:
                         _match += 1
                 elif attr == "title":
-                    logger.info("matching '%s' against title" % val)
+                    logger.info("matching '%s' against title", val)
                     if _bs is None:
                         break
                     if _bs.title is None:
@@ -125,8 +126,8 @@ class Interaction(object):
                         _match += 1
                     else:
                         _c = _bs.title.contents
-                        if isinstance(_c, list) and not isinstance(_c,
-                                                                   basestring):
+                        if isinstance(_c, list) and not isinstance(
+                          _c, six.string_types):
                             for _line in _c:
                                 if val in _line:
                                     _match += 1
@@ -139,7 +140,7 @@ class Interaction(object):
                         _match += 1
 
             if _match == len(interaction["matches"]):
-                logger.info("Matched: %s" % interaction["matches"])
+                logger.info("Matched: %s", interaction["matches"])
                 return interaction
 
         raise InteractionNeeded("No interaction matched")
@@ -186,7 +187,7 @@ class Interaction(object):
                             _default = _ava["value"]
                             try:
                                 orig_val = form[prop]
-                                if isinstance(orig_val, basestring):
+                                if isinstance(orig_val, six.string_types):
                                     if orig_val == _default:
                                         _form = form
                                 elif _default in orig_val:
@@ -318,7 +319,7 @@ class Interaction(object):
         else:
             url = path
 
-        logger.info("GET %s" % url)
+        logger.info("GET %s", url)
         return self.httpc.send(url, "GET")
         #return resp, ""
 
@@ -389,8 +390,8 @@ class Action(object):
 
         _args.update({"location": location, "features": features, "conv": conv})
 
-        logger.info("<-- FUNCTION: %s" % function.__name__)
-        logger.info("<-- ARGS: %s" % _args)
+        logger.info("<-- FUNCTION: %s", function.__name__)
+        logger.info("<-- ARGS: %s", _args)
 
         result = function(response, **_args)
         self.post_op(result, conv, _args)

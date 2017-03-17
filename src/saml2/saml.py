@@ -11,8 +11,9 @@ from saml2.validate import valid_domain_name
 import saml2
 from saml2 import SamlBase
 
-import xmldsig as ds
-import xmlenc as xenc
+import six
+from saml2 import xmldsig as ds
+from saml2 import xmlenc as xenc
 
 NAMESPACE = 'urn:oasis:names:tc:SAML:2.0:assertion'
 
@@ -100,12 +101,15 @@ def _decode_attribute_value(typ, text):
 
 
 def _verify_value_type(typ, val):
-    #print "verify value type: %s, %s" % (typ, val)
+    #  print("verify value type: %s, %s" % (typ, val))
     if typ == XSD + "string":
         try:
             return str(val)
         except UnicodeEncodeError:
-            return unicode(val)
+            if six.PY2:
+                return unicode(val)
+            else:
+                return val.decode('utf8')
     if typ == XSD + "integer" or typ == XSD + "int":
         return int(val)
     if typ == XSD + "float" or typ == XSD + "double":
@@ -118,7 +122,7 @@ def _verify_value_type(typ, val):
     if typ == XSD + "base64Binary":
         import base64
 
-        return base64.decodestring(val)
+        return base64.decodestring(val.encode('utf-8'))
 
 
 class AttributeValueBase(SamlBase):
@@ -165,6 +169,13 @@ class AttributeValueBase(SamlBase):
         except AttributeError:
             self._extatt[XSI_TYPE] = typ
 
+        if typ.startswith('xs:'):
+            try:
+                self.extension_attributes['xmlns:xs'] = XS_NAMESPACE
+            except AttributeError:
+                self._extatt['xmlns:xs'] = XS_NAMESPACE
+
+
     def get_type(self):
         try:
             return self.extension_attributes[XSI_TYPE]
@@ -192,7 +203,9 @@ class AttributeValueBase(SamlBase):
             val = base64.encodestring(val)
             self.set_type("xs:base64Binary")
         else:
-            if isinstance(val, basestring):
+            if isinstance(val, six.binary_type):
+                val = val.decode('utf-8')
+            if isinstance(val, six.string_types):
                 if not typ:
                     self.set_type("xs:string")
                 else:
@@ -250,10 +263,10 @@ class AttributeValueBase(SamlBase):
         # Fill in the instance members from the contents of the XML tree.
         for child in tree:
             self._convert_element_tree_to_member(child)
-        for attribute, value in tree.attrib.iteritems():
+        for attribute, value in iter(tree.attrib.items()):
             self._convert_element_attribute_to_member(attribute, value)
         if tree.text:
-            #print "set_text:", tree.text
+            #print("set_text:", tree.text)
             # clear type
             #self.clear_type()
             self.set_text(tree.text)
@@ -438,7 +451,7 @@ class SubjectConfirmationDataType_(SamlBase):
     c_attributes = SamlBase.c_attributes.copy()
     c_child_order = SamlBase.c_child_order[:]
     c_cardinality = SamlBase.c_cardinality.copy()
-    c_attributes['NotBefore'] = ('not_before', 'AsTime', False)
+    c_attributes['NotBefore'] = ('not_before', 'dateTime', False)
     c_attributes['NotOnOrAfter'] = ('not_on_or_after', 'dateTime', False)
     c_attributes['Recipient'] = ('recipient', 'anyURI', False)
     c_attributes['InResponseTo'] = ('in_response_to', 'NCName', False)

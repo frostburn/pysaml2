@@ -1,8 +1,8 @@
 import base64
 from contextlib import closing
 from hashlib import sha1
-from urlparse import urlparse
-from urlparse import parse_qs
+from six.moves.urllib.parse import urlparse
+from six.moves.urllib.parse import parse_qs
 from saml2 import BINDING_HTTP_ARTIFACT
 from saml2 import BINDING_SOAP
 from saml2 import BINDING_HTTP_POST
@@ -54,14 +54,14 @@ def get_msg(hinfo, binding, response=False):
 
 def test_create_artifact():
     b64art = create_artifact("http://sp.example.com/saml.xml",
-                             "aabbccddeeffgghhiijj")
+                             b"aabbccddeeffgghhiijj")
 
-    art = base64.b64decode(b64art)
+    art = base64.b64decode(b64art.encode('ascii'))
 
-    assert art[:2] == '\x00\x04'
+    assert art[:2] == ARTIFACT_TYPECODE
     assert int(art[2:4]) == 0
 
-    s = sha1("http://sp.example.com/saml.xml")
+    s = sha1(b"http://sp.example.com/saml.xml")
     assert art[4:24] == s.digest()
 
 SP = 'urn:mace:example.com:saml:roland:sp'
@@ -74,7 +74,7 @@ def test_create_artifact_resolve():
     #assert artifact[:2] == '\x00\x04'
     #assert int(artifact[2:4]) == 0
     #
-    s = sha1(SP)
+    s = sha1(SP.encode('ascii'))
     assert artifact[4:24] == s.digest()
 
     with closing(Server(config_file="idp_all_conf")) as idp:
@@ -85,7 +85,7 @@ def test_create_artifact_resolve():
 
         msg_id, msg = idp.create_artifact_resolve(b64art, destination, sid())
 
-        print msg
+        print(msg)
 
         args = idp.use_soap(msg, destination, None, False)
 
@@ -93,7 +93,7 @@ def test_create_artifact_resolve():
 
         ar = sp.parse_artifact_resolve(args["data"])
 
-        print ar
+        print(ar)
 
         assert ar.artifact.text == b64art
 
@@ -116,7 +116,7 @@ def test_artifact_flow():
                                                [BINDING_HTTP_ARTIFACT],
                                                entity_id=idp.config.entityid)
 
-        hinfo = sp.apply_binding(binding, "%s" % artifact, destination, relay_state)
+        hinfo = sp.apply_binding(binding, artifact, destination, relay_state)
 
         # ========== @IDP ============
 
@@ -177,7 +177,7 @@ def test_artifact_flow():
                                              authn=AUTHN,
                                              **resp_args)
 
-        print response
+        print(response)
 
         # with the response in hand create an artifact
 
@@ -201,7 +201,7 @@ def test_artifact_flow():
         # Got an artifact want to replace it with the real message
         msg_id, msg = sp.create_artifact_resolve(artifact3, destination, sid())
 
-        print msg
+        print(msg)
 
         hinfo = sp.use_soap(msg, destination, None, False)
 
@@ -211,7 +211,7 @@ def test_artifact_flow():
 
         ar = idp.parse_artifact_resolve(msg)
 
-        print ar
+        print(ar)
 
         assert ar.artifact.text == artifact3
 

@@ -1,20 +1,19 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+import copy
 import importlib
 import logging
-
 import re
-from saml2.saml import NAME_FORMAT_URI
-import xmlenc
+import six
 
 from saml2 import saml
-
-from saml2.time_util import instant, in_a_while
+from saml2 import xmlenc
 from saml2.attribute_converter import from_local, get_local_name
-from saml2.s_utils import sid, MissingValue
-from saml2.s_utils import factory
 from saml2.s_utils import assertion_factory
-
+from saml2.s_utils import factory
+from saml2.s_utils import sid, MissingValue
+from saml2.saml import NAME_FORMAT_URI
+from saml2.time_util import instant, in_a_while
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +30,7 @@ def _filter_values(vals, vlist=None, must=False):
     if not vlist:  # No value specified equals any value
         return vals
 
-    if isinstance(vlist, basestring):
+    if isinstance(vlist, six.string_types):
         vlist = [vlist]
 
     res = []
@@ -77,55 +76,56 @@ def filter_on_attributes(ava, required=None, optional=None, acs=None,
         are missing fail or fail not depending on this parameter.
     :return: The modified attribute value assertion
     """
+
+    def _match_attr_name(attr, ava):
+        try:
+            friendly_name = attr["friendly_name"]
+        except KeyError:
+            friendly_name = get_local_name(acs, attr["name"],
+                                           attr["name_format"])
+
+        _fn = _match(friendly_name, ava)
+        if not _fn:  # In the unlikely case that someone has provided us with
+            #  URIs as attribute names
+            _fn = _match(attr["name"], ava)
+
+        return _fn
+
+    def _apply_attr_value_restrictions(attr, res, must=False):
+        try:
+            values = [av["text"] for av in attr["attribute_value"]]
+        except KeyError:
+            values = []
+
+        try:
+            res[_fn].extend(_filter_values(ava[_fn], values))
+        except KeyError:
+            res[_fn] = _filter_values(ava[_fn], values)
+
+        return _filter_values(ava[_fn], values, must)
+
     res = {}
 
     if required is None:
         required = []
 
-    nform = "friendly_name"
     for attr in required:
-        try:
-            _name = attr[nform]
-        except KeyError:
-            if nform == "friendly_name":
-                _name = get_local_name(acs, attr["name"],
-                                       attr["name_format"])
-            else:
-                continue
-
-        _fn = _match(_name, ava)
-        if not _fn:  # In the unlikely case that someone has provided us
-                     # with URIs as attribute names
-            _fn = _match(attr["name"], ava)
+        _fn = _match_attr_name(attr, ava)
 
         if _fn:
-            try:
-                values = [av["text"] for av in attr["attribute_value"]]
-            except KeyError:
-                values = []
-            res[_fn] = _filter_values(ava[_fn], values, True)
-            continue
+            _apply_attr_value_restrictions(attr, res, True)
         elif fail_on_unfulfilled_requirements:
             desc = "Required attribute missing: '%s' (%s)" % (attr["name"],
-                                                              _name)
+                                                              _fn)
             raise MissingValue(desc)
 
     if optional is None:
         optional = []
 
     for attr in optional:
-        for nform in ["friendly_name", "name"]:
-            if nform in attr:
-                _fn = _match(attr[nform], ava)
-                if _fn:
-                    try:
-                        values = [av["text"] for av in attr["attribute_value"]]
-                    except KeyError:
-                        values = []
-                    try:
-                        res[_fn].extend(_filter_values(ava[_fn], values))
-                    except KeyError:
-                        res[_fn] = _filter_values(ava[_fn], values)
+        _fn = _match_attr_name(attr, ava)
+        if _fn:
+            _apply_attr_value_restrictions(attr, res, False)
 
     return res
 
@@ -228,7 +228,7 @@ def filter_attribute_value_assertions(ava, attribute_restrictions=None):
     if not attribute_restrictions:
         return ava
 
-    for attr, vals in ava.items():
+    for attr, vals in list(ava.items()):
         _attr = attr.lower()
         try:
             _rests = attribute_restrictions[_attr]
@@ -237,7 +237,7 @@ def filter_attribute_value_assertions(ava, attribute_restrictions=None):
         else:
             if _rests is None:
                 continue
-            if isinstance(vals, basestring):
+            if isinstance(vals, six.string_types):
                 vals = [vals]
             rvals = []
             for restr in _rests:
@@ -267,20 +267,23 @@ def restriction_from_attribute_spec(attributes):
 
 def post_entity_categories(maps, **kwargs):
     restrictions = {}
+    try:
+        required = [d['friendly_name'].lower() for d in kwargs['required']]
+    except (KeyError, TypeError):
+        required = []
+
     if kwargs["mds"]:
-        try:
+        if "sp_entity_id" in kwargs:
             ecs = kwargs["mds"].entity_categories(kwargs["sp_entity_id"])
-        except KeyError:
             for ec_map in maps:
-                for attr in ec_map[""]:
-                    restrictions[attr] = None
-        else:
-            for ec_map in maps:
-                for key, val in ec_map.items():
+                for key, (atlist, only_required) in ec_map.items():
                     if key == "":  # always released
-                        attrs = val
+                        attrs = atlist
                     elif isinstance(key, tuple):
-                        attrs = val
+                        if only_required:
+                            attrs = [a for a in atlist if a in required]
+                        else:
+                            attrs = atlist
                         for _key in key:
                             try:
                                 assert _key in ecs
@@ -288,12 +291,19 @@ def post_entity_categories(maps, **kwargs):
                                 attrs = []
                                 break
                     elif key in ecs:
-                        attrs = val
+                        if only_required:
+                            attrs = [a for a in atlist if a in required]
+                        else:
+                            attrs = atlist
                     else:
                         attrs = []
 
                     for attr in attrs:
                         restrictions[attr] = None
+        else:
+            for ec_map in maps:
+                for attr in ec_map[""]:
+                    restrictions[attr] = None
 
     return restrictions
 
@@ -320,7 +330,7 @@ class Policy(object):
             a compiled regular expression.
         """
 
-        self._restrictions = restrictions.copy()
+        self._restrictions = copy.deepcopy(restrictions)
 
         for who, spec in self._restrictions.items():
             if spec is None:
@@ -336,7 +346,12 @@ class Policy(object):
                         "saml2.entity_category.%s" % cat)
                     _ec = {}
                     for key, items in _mod.RELEASE.items():
-                        _ec[key] = [k.lower() for k in items]
+                        alist = [k.lower() for k in items]
+                        try:
+                            _only_required = _mod.ONLY_REQUIRED[key]
+                        except (AttributeError, KeyError):
+                            _only_required = False
+                        _ec[key] = (alist, _only_required)
                     ecs.append(_ec)
                 spec["entity_categories"] = ecs
             try:
@@ -355,7 +370,7 @@ class Policy(object):
 
                 _are[key.lower()] = [re.compile(value) for value in values]
             spec["attribute_restrictions"] = _are
-        logger.debug("policy restrictions: %s" % self._restrictions)
+        logger.debug("policy restrictions: %s", self._restrictions)
 
         return self._restrictions
 
@@ -404,7 +419,7 @@ class Policy(object):
         :retur: The format
         """
 
-        return self.get("name_format", sp_entity_id, NAME_FORMAT_URI)
+        return self.get("name_form", sp_entity_id, NAME_FORMAT_URI)
 
     def get_lifetime(self, sp_entity_id):
         """ The lifetime of the assertion
@@ -445,7 +460,7 @@ class Policy(object):
                 pass
         return []
 
-    def get_entity_categories(self, sp_entity_id, mds):
+    def get_entity_categories(self, sp_entity_id, mds, required):
         """
 
         :param sp_entity_id:
@@ -453,7 +468,7 @@ class Policy(object):
         :return: A dictionary with restrictions
         """
 
-        kwargs = {"mds": mds}
+        kwargs = {"mds": mds, 'required': required}
 
         return self.get("entity_categories", sp_entity_id, default={},
                         post_func=post_entity_categories, **kwargs)
@@ -484,19 +499,15 @@ class Policy(object):
         """
 
         _ava = None
-        if required or optional:
-            logger.debug("required: %s, optional: %s" % (required, optional))
+
+        _rest = self.get_entity_categories(sp_entity_id, mdstore, required)
+        if _rest:
+            _ava = filter_attribute_value_assertions(ava.copy(), _rest)
+        elif required or optional:
+            logger.debug("required: %s, optional: %s", required, optional)
             _ava = filter_on_attributes(
                 ava.copy(), required, optional, self.acs,
                 self.get_fail_on_missing_requested(sp_entity_id))
-
-        _rest = self.get_entity_categories(sp_entity_id, mdstore)
-        if _rest:
-            ava_ec = filter_attribute_value_assertions(ava.copy(), _rest)
-            if _ava is None:
-                _ava = ava_ec
-            else:
-                _ava.update(ava_ec)
 
         _rest = self.get_attribute_restrictions(sp_entity_id)
         if _rest:
@@ -604,7 +615,7 @@ def _authn_context_decl_ref(decl_ref, authn_auth=None):
 
 def authn_statement(authn_class=None, authn_auth=None,
                     authn_decl=None, authn_decl_ref=None, authn_instant="",
-                    subject_locality=""):
+                    subject_locality="", session_not_on_or_after=None):
     """
     Construct the AuthnStatement
     :param authn_class: Authentication Context Class reference
@@ -628,6 +639,7 @@ def authn_statement(authn_class=None, authn_auth=None,
             saml.AuthnStatement,
             authn_instant=_instant,
             session_index=sid(),
+            session_not_on_or_after=session_not_on_or_after,
             authn_context=_authn_context_class_ref(
                 authn_class, authn_auth))
     elif authn_decl:
@@ -635,24 +647,69 @@ def authn_statement(authn_class=None, authn_auth=None,
             saml.AuthnStatement,
             authn_instant=_instant,
             session_index=sid(),
+            session_not_on_or_after=session_not_on_or_after,
             authn_context=_authn_context_decl(authn_decl, authn_auth))
     elif authn_decl_ref:
         res = factory(
             saml.AuthnStatement,
             authn_instant=_instant,
             session_index=sid(),
+            session_not_on_or_after=session_not_on_or_after,
             authn_context=_authn_context_decl_ref(authn_decl_ref,
-                                                       authn_auth))
+                                                  authn_auth))
     else:
         res = factory(
             saml.AuthnStatement,
             authn_instant=_instant,
-            session_index=sid())
+            session_index=sid(),
+            session_not_on_or_after=session_not_on_or_after)
 
     if subject_locality:
         res.subject_locality = saml.SubjectLocality(text=subject_locality)
 
     return res
+
+
+def do_subject_confirmation(policy, sp_entity_id, key_info=None, **treeargs):
+    """
+
+    :param policy: Policy instance
+    :param sp_entity_id: The entityid of the SP
+    :param subject_confirmation_method: How was the subject confirmed
+    :param address: The network address/location from which an attesting entity
+        can present the assertion.
+    :param key_info: Information of the key used to confirm the subject
+    :param in_response_to: The ID of a SAML protocol message in response to
+        which an attesting entity can present the assertion.
+    :param recipient: A URI specifying the entity or location to which an
+        attesting entity can present the assertion.
+    :param not_before: A time instant before which the subject cannot be
+        confirmed. The time value MUST be encoded in UTC.
+    :return:
+    """
+
+    _sc = factory(saml.SubjectConfirmation, **treeargs)
+
+    _scd = _sc.subject_confirmation_data
+    _scd.not_on_or_after = policy.not_on_or_after(sp_entity_id)
+
+    if _sc.method == saml.SCM_HOLDER_OF_KEY:
+        _scd.add_extension_element(key_info)
+
+    return _sc
+
+
+def do_subject(policy, sp_entity_id, name_id, **farg):
+    #
+    specs = farg['subject_confirmation']
+
+    if isinstance(specs, list):
+        res = [do_subject_confirmation(policy, sp_entity_id, **s) for s in
+               specs]
+    else:
+        res = [do_subject_confirmation(policy, sp_entity_id, **specs)]
+
+    return factory(saml.Subject, name_id=name_id, subject_confirmation=res)
 
 
 class Assertion(dict):
@@ -662,17 +719,16 @@ class Assertion(dict):
         dict.__init__(self, dic)
         self.acs = []
 
-    def construct(self, sp_entity_id, in_response_to, consumer_url,
-                  name_id, attrconvs, policy, issuer, authn_class=None,
-                  authn_auth=None, authn_decl=None, encrypt=None,
-                  sec_context=None, authn_decl_ref=None, authn_instant="",
-                  subject_locality="", authn_statem=None, add_subject=True):
+    def construct(self, sp_entity_id, attrconvs, policy, issuer, farg,
+                  authn_class=None, authn_auth=None, authn_decl=None,
+                  encrypt=None, sec_context=None, authn_decl_ref=None,
+                  authn_instant="", subject_locality="", authn_statem=None,
+                  name_id=None, session_not_on_or_after=None):
         """ Construct the Assertion
 
         :param sp_entity_id: The entityid of the SP
         :param in_response_to: An identifier of the message, this message is
             a response to
-        :param consumer_url: The intended consumer of the assertion
         :param name_id: An NameID instance
         :param attrconvs: AttributeConverters
         :param policy: The policy that should be adhered to when replying
@@ -718,39 +774,22 @@ class Assertion(dict):
             _authn_statement = authn_statement(authn_class, authn_auth,
                                                authn_decl, authn_decl_ref,
                                                authn_instant,
-                                               subject_locality)
+                                               subject_locality,
+                                               session_not_on_or_after=session_not_on_or_after)
         else:
             _authn_statement = None
 
-        if not add_subject:
-            _ass = assertion_factory(
-                issuer=issuer,
-                conditions=conds,
-                subject=None
-            )
-        else:
-            _ass = assertion_factory(
-                issuer=issuer,
-                conditions=conds,
-                subject=factory(
-                    saml.Subject,
-                    name_id=name_id,
-                    subject_confirmation=[factory(
-                        saml.SubjectConfirmation,
-                        method=saml.SCM_BEARER,
-                        subject_confirmation_data=factory(
-                            saml.SubjectConfirmationData,
-                            in_response_to=in_response_to,
-                            recipient=consumer_url,
-                            not_on_or_after=policy.not_on_or_after(sp_entity_id)))]
-                ),
-            )
+        subject = do_subject(policy, sp_entity_id, name_id,
+                             **farg['subject'])
+
+        _ass = assertion_factory(issuer=issuer, conditions=conds,
+                                 subject=subject)
 
         if _authn_statement:
             _ass.authn_statement = [_authn_statement]
 
         if not attr_statement.empty():
-            _ass.attribute_statement=[attr_statement]
+            _ass.attribute_statement = [attr_statement]
 
         return _ass
 
@@ -766,7 +805,7 @@ class Assertion(dict):
         policy.acs = self.acs
         ava = policy.restrict(self, sp_entity_id, metadata)
 
-        for key, val in self.items():
+        for key, val in list(self.items()):
             if key in ava:
                 self[key] = ava[key]
             else:

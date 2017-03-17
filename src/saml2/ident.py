@@ -1,12 +1,13 @@
 import copy
 import shelve
 import logging
+import six
 
 from hashlib import sha256
-from urllib import quote
-from urllib import unquote
+from six.moves.urllib.parse import quote
+from six.moves.urllib.parse import unquote
 from saml2 import SAMLError
-from saml2.s_utils import rndstr
+from saml2.s_utils import rndbytes
 from saml2.s_utils import PolicyError
 from saml2.saml import NameID
 from saml2.saml import NAMEID_FORMAT_PERSISTENT
@@ -28,8 +29,8 @@ class Unknown(SAMLError):
 def code(item):
     """
     Turn a NameID class instance into a quoted string of comma separated
-    attribute,value pairs. The attribute name is replaced with a digits.
-    Depends on knowledge on the specific order of the attributes for that
+    attribute,value pairs. The attribute names are replaced with digits.
+    Depends on knowledge on the specific order of the attributes for the
     class that is used.
 
     :param item: The class instance
@@ -43,6 +44,16 @@ def code(item):
             _res.append("%d=%s" % (i, quote(val)))
         i += 1
     return ",".join(_res)
+
+
+def code_binary(item):
+    """
+    Return a binary 'code' suitable for hashing.
+    """
+    code_str = code(item)
+    if isinstance(code_str, six.string_types):
+        return code_str.encode('utf-8')
+    return code_str
 
 
 def decode(txt):
@@ -66,19 +77,25 @@ class IdentDB(object):
      Keeps a list of all nameIDs returned per SP
     """
     def __init__(self, db, domain="", name_qualifier=""):
-        if isinstance(db, basestring):
-            self.db = shelve.open(db)
+        if isinstance(db, six.string_types):
+            self.db = shelve.open(db, protocol=2)
         else:
             self.db = db
         self.domain = domain
         self.name_qualifier = name_qualifier
 
     def _create_id(self, nformat, name_qualifier="", sp_name_qualifier=""):
-        _id = sha256(rndstr(32))
+        _id = sha256(rndbytes(32))
+        if not isinstance(nformat, six.binary_type):
+            nformat = nformat.encode('utf-8')
         _id.update(nformat)
         if name_qualifier:
+            if not isinstance(name_qualifier, six.binary_type):
+                name_qualifier = name_qualifier.encode('utf-8')
             _id.update(name_qualifier)
         if sp_name_qualifier:
+            if not isinstance(sp_name_qualifier, six.binary_type):
+                sp_name_qualifier = sp_name_qualifier.encode('utf-8')
             _id.update(sp_name_qualifier)
         return _id.hexdigest()
 
@@ -94,9 +111,6 @@ class IdentDB(object):
         :param ident: user identifier
         :param name_id: NameID instance
         """
-        if isinstance(ident, unicode):
-            ident = ident.encode("utf-8")
-
         # One user may have more than one NameID defined
         try:
             val = self.db[ident].split(" ")
@@ -149,8 +163,8 @@ class IdentDB(object):
 
             _id = "%s@%s" % (_id, self.domain)
 
-        if nformat == NAMEID_FORMAT_PERSISTENT:
-            _id = userid
+        # if nformat == NAMEID_FORMAT_PERSISTENT:
+        #     _id = userid
 
         nameid = NameID(format=nformat, sp_name_qualifier=sp_name_qualifier,
                         name_qualifier=name_qualifier, text=_id)
@@ -170,7 +184,7 @@ class IdentDB(object):
         try:
             _vals = self.db[userid]
         except KeyError:
-            logger.debug("failed to find userid %s in IdentDB" % userid)
+            logger.debug("failed to find userid %s in IdentDB", userid)
             return res
 
         for val in _vals.split(" "):
@@ -197,8 +211,8 @@ class IdentDB(object):
         :return:
         """
 
-        logger.debug("local_policy: %s, name_id_policy: %s" % (local_policy,
-                                                               name_id_policy))
+        logger.debug("local_policy: %s, name_id_policy: %s", local_policy,
+                                                               name_id_policy)
 
         if name_id_policy and name_id_policy.sp_name_qualifier:
             sp_name_qualifier = name_id_policy.sp_name_qualifier
@@ -266,8 +280,8 @@ class IdentDB(object):
         try:
             return self.db[name_id.text]
         except KeyError:
-            logger.debug("name: %s" % name_id.text)
-            #logger.debug("id sub keys: %s" % self.subkeys())
+            logger.debug("name: %s", name_id.text)
+            #logger.debug("id sub keys: %s", self.subkeys())
             return None
 
     def match_local_id(self, userid, sp_name_qualifier, name_qualifier):

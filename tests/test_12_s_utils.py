@@ -3,28 +3,46 @@
 
 import base64
 
+import six
+
 from saml2 import s_utils as utils
 from saml2 import saml
 from saml2 import samlp
+from saml2.argtree import set_arg
 
 from saml2.s_utils import do_attribute_statement
-from saml2.saml import Attribute
+from saml2.saml import Attribute, Subject
 from saml2.saml import NAME_FORMAT_URI
 
 from py.test import raises
 
 from pathutils import full_path
 
-SUCCESS_STATUS = ('<?xml version=\'1.0\' encoding=\'UTF-8\'?>\n'
-'<ns0:Status xmlns:ns0="urn:oasis:names:tc:SAML:2.0:protocol"><ns0:StatusCode '
-'Value="urn:oasis:names:tc:SAML:2.0:status:Success" /></ns0:Status>')
+XML_HEADER = '<?xml version=\'1.0\' encoding=\'UTF-8\'?>\n'
 
-ERROR_STATUS = ('<?xml version=\'1.0\' encoding=\'UTF-8\'?>\n'
-'<ns0:Status xmlns:ns0="urn:oasis:names:tc:SAML:2.0:protocol"><ns0:StatusCode '
-'Value="urn:oasis:names:tc:SAML:2.0:status:Responder"><ns0:StatusCode '
-'Value="urn:oasis:names:tc:SAML:2.0:status:UnknownPrincipal" '
-'/></ns0:StatusCode><ns0:StatusMessage>Error resolving '
-'principal</ns0:StatusMessage></ns0:Status>')
+SUCCESS_STATUS_NO_HEADER = (
+    '<ns0:Status xmlns:ns0="urn:oasis:names:tc:SAML:2.0:protocol"><ns0'
+    ':StatusCode '
+    'Value="urn:oasis:names:tc:SAML:2.0:status:Success" /></ns0:Status>')
+SUCCESS_STATUS = '%s%s' % (XML_HEADER, SUCCESS_STATUS_NO_HEADER)
+
+ERROR_STATUS_NO_HEADER = (
+    '<ns0:Status xmlns:ns0="urn:oasis:names:tc:SAML:2.0:protocol"><ns0'
+    ':StatusCode '
+    'Value="urn:oasis:names:tc:SAML:2.0:status:Responder"><ns0:StatusCode '
+    'Value="urn:oasis:names:tc:SAML:2.0:status:UnknownPrincipal" '
+    '/></ns0:StatusCode><ns0:StatusMessage>Error resolving '
+    'principal</ns0:StatusMessage></ns0:Status>')
+
+ERROR_STATUS_NO_HEADER_EMPTY = (
+    '<ns0:Status xmlns:ns0="urn:oasis:names:tc:SAML:2.0:protocol"><ns0'
+    ':StatusCode '
+    'Value="urn:oasis:names:tc:SAML:2.0:status:Responder"><ns0:StatusCode '
+    'Value="urn:oasis:names:tc:SAML:2.0:status:UnknownPrincipal" '
+    '/></ns0:StatusCode></ns0:Status>')
+
+ERROR_STATUS = '%s%s' % (XML_HEADER, ERROR_STATUS_NO_HEADER)
+ERROR_STATUS_EMPTY = '%s%s' % (XML_HEADER, ERROR_STATUS_NO_HEADER_EMPTY)
 
 
 def _eq(l1, l2):
@@ -33,13 +51,13 @@ def _eq(l1, l2):
 
 def _oeq(l1, l2):
     if len(l1) != len(l2):
-        print "Different number of items"
+        print("Different number of items")
         return False
     for item in l1:
         if item not in l2:
-            print "%s not in l2" % (item,)
+            print("%s not in l2" % (item,))
             for ite in l2:
-                print "\t%s" % (ite,)
+                print("\t%s" % (ite,))
             return False
     return True
 
@@ -48,16 +66,20 @@ def test_inflate_then_deflate():
     txt = """Selma Lagerlöf (1858-1940) was born in Östra Emterwik, Värmland,
     Sweden. She was brought up on Mårbacka, the family estate, which she did 
     not leave until 1881, when she went to a teachers' college at Stockholm"""
+    if not isinstance(txt, six.binary_type):
+        txt = txt.encode('utf-8')
 
     interm = utils.deflate_and_base64_encode(txt)
     bis = utils.decode_base64_and_inflate(interm)
+    if not isinstance(bis, six.binary_type):
+        bis = bis.encode('utf-8')
     assert bis == txt
 
 
 def test_status_success():
     status = utils.success_status_factory()
     status_text = "%s" % status
-    assert status_text == SUCCESS_STATUS
+    assert status_text in (SUCCESS_STATUS_NO_HEADER, SUCCESS_STATUS)
     assert status.status_code.value == samlp.STATUS_SUCCESS
 
 
@@ -67,22 +89,35 @@ def test_error_status():
                                           samlp.STATUS_RESPONDER)
 
     status_text = "%s" % status
-    print status_text
-    assert status_text == ERROR_STATUS
+    print(status_text)
+    assert status_text in (ERROR_STATUS_NO_HEADER, ERROR_STATUS)
 
 
 def test_status_from_exception():
     e = utils.UnknownPrincipal("Error resolving principal")
     stat = utils.error_status_factory(e)
     status_text = "%s" % stat
-    print status_text
-    assert status_text == ERROR_STATUS
+    print(status_text)
+    assert status_text in (ERROR_STATUS_NO_HEADER, ERROR_STATUS)
+
+
+def test_status_from_tuple():
+    stat = utils.error_status_factory((samlp.STATUS_UNKNOWN_PRINCIPAL,
+                                       'Error resolving principal'))
+    status_text = "%s" % stat
+    assert status_text in (ERROR_STATUS_NO_HEADER, ERROR_STATUS)
+
+
+def test_status_from_tuple_empty_message():
+    stat = utils.error_status_factory((samlp.STATUS_UNKNOWN_PRINCIPAL, None))
+    status_text = "%s" % stat
+    assert status_text in (ERROR_STATUS_EMPTY, ERROR_STATUS_NO_HEADER_EMPTY)
 
 
 def test_attribute_sn():
     attr = utils.do_attributes({"surName": ("Jeter", "")})
     assert len(attr) == 1
-    print attr
+    print(attr)
     inst = attr[0]
     assert inst.name == "surName"
     assert len(inst.attribute_value) == 1
@@ -95,7 +130,7 @@ def test_attribute_age():
 
     assert len(attr) == 1
     inst = attr[0]
-    print inst
+    print(inst)
     assert inst.name == "age"
     assert len(inst.attribute_value) == 1
     av = inst.attribute_value[0]
@@ -108,7 +143,7 @@ def test_attribute_onoff():
 
     assert len(attr) == 1
     inst = attr[0]
-    print inst
+    print(inst)
     assert inst.name == "onoff"
     assert len(inst.attribute_value) == 1
     av = inst.attribute_value[0]
@@ -117,12 +152,15 @@ def test_attribute_onoff():
 
 
 def test_attribute_base64():
-    b64sl = base64.b64encode("Selma Lagerlöf")
+    txt = "Selma Lagerlöf"
+    if not isinstance(txt, six.binary_type):
+        txt = txt.encode("utf-8")
+    b64sl = base64.b64encode(txt).decode('ascii')
     attr = utils.do_attributes({"name": (b64sl, "xs:base64Binary")})
 
     assert len(attr) == 1
     inst = attr[0]
-    print inst
+    print(inst)
     assert inst.name == "name"
     assert len(inst.attribute_value) == 1
     av = inst.attribute_value[0]
@@ -133,7 +171,7 @@ def test_attribute_base64():
 def test_attribute_statement():
     statement = do_attribute_statement({"surName": ("Jeter", ""),
                                         "givenName": ("Derek", "")})
-    print statement
+    print(statement)
     assert statement.keyswv() == ["attribute"]
     assert len(statement.attribute) == 2
     attr0 = statement.attribute[0]
@@ -180,7 +218,7 @@ def test_conditions():
 
 
 def test_value_1():
-    #FriendlyName="givenName" Name="urn:oid:2.5.4.42" 
+    # FriendlyName="givenName" Name="urn:oid:2.5.4.42"
     # NameFormat="urn:oasis:names:tc:SAML:2.0:attrname-format:uri"
     attribute = utils.factory(saml.Attribute, name="urn:oid:2.5.4.42",
                               name_format=NAME_FORMAT_URI)
@@ -304,7 +342,7 @@ def test_parse_attribute_map():
 
     assert _eq(forward.keys(), backward.values())
     assert _eq(forward.values(), backward.keys())
-    print forward.keys()
+    print(forward.keys())
     assert _oeq(forward.keys(), [
         ('urn:oid:1.3.6.1.4.1.5923.1.1.1.7', NAME_FORMAT_URI),
         ('urn:oid:0.9.2342.19200300.100.1.1', NAME_FORMAT_URI),
@@ -497,3 +535,14 @@ def test_signature():
     arr.append(csum)
 
     assert utils.verify_signature("abcdef", arr)
+
+
+def test_complex_factory():
+    r = set_arg(Subject, 'in_response_to', '123456')
+    subject = utils.factory(Subject, **r[0])
+    assert _eq(subject.keyswv(), ['subject_confirmation'])
+    assert _eq(subject.subject_confirmation.keyswv(),
+               ['subject_confirmation_data'])
+    assert _eq(subject.subject_confirmation.subject_confirmation_data.keyswv(),
+               ['in_response_to'])
+    assert subject.subject_confirmation.subject_confirmation_data.in_response_to == '123456'

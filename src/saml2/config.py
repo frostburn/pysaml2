@@ -1,15 +1,14 @@
 #!/usr/bin/env python
 
-__author__ = 'rolandh'
-
 import copy
-import sys
-import os
-import re
+import importlib
 import logging
 import logging.handlers
+import os
+import re
+import sys
 
-from importlib import import_module
+import six
 
 from saml2 import root_logger, BINDING_URI, SAMLError
 from saml2 import BINDING_SOAP
@@ -20,36 +19,18 @@ from saml2 import BINDING_HTTP_ARTIFACT
 from saml2.attribute_converter import ac_factory
 from saml2.assertion import Policy
 from saml2.mdstore import MetadataStore
+from saml2.saml import NAME_FORMAT_URI
 from saml2.virtual_org import VirtualOrg
 
 logger = logging.getLogger(__name__)
 
-from saml2 import md
-from saml2 import saml
-from saml2.extension import mdui
-from saml2.extension import idpdisc
-from saml2.extension import dri
-from saml2.extension import mdattr
-from saml2.extension import ui
-import xmldsig
-import xmlenc
+__author__ = 'rolandh'
 
-
-ONTS = {
-    saml.NAMESPACE: saml,
-    mdui.NAMESPACE: mdui,
-    mdattr.NAMESPACE: mdattr,
-    dri.NAMESPACE: dri,
-    ui.NAMESPACE: ui,
-    idpdisc.NAMESPACE: idpdisc,
-    md.NAMESPACE: md,
-    xmldsig.NAMESPACE: xmldsig,
-    xmlenc.NAMESPACE: xmlenc
-}
 
 COMMON_ARGS = [
     "entityid", "xmlsec_binary", "debug", "key_file", "cert_file",
-    "encryption_type", "secret", "accepted_time_diff", "name", "ca_certs",
+    "encryption_keypairs", "additional_cert_files",
+    "metadata_key_usage", "secret", "accepted_time_diff", "name", "ca_certs",
     "description", "valid_for", "verify_ssl_cert",
     "organization",
     "contact_person",
@@ -57,9 +38,8 @@ COMMON_ARGS = [
     "virtual_organization",
     "logger",
     "only_use_keys_in_metadata",
-    "logout_requests_signed",
     "disable_ssl_certificate_validation",
-    "referred_binding",
+    "preferred_binding",
     "session_storage",
     "entity_category",
     "xmlsec_path",
@@ -67,12 +47,14 @@ COMMON_ARGS = [
     "cert_handler_extra_class",
     "generate_cert_func",
     "generate_cert_info",
-    "verify_encrypt_cert",
+    "verify_encrypt_cert_advice",
+    "verify_encrypt_cert_assertion",
     "tmp_cert_file",
     "tmp_key_file",
     "validate_certificate",
     "extensions",
-    "allow_unknown_attributes"
+    "allow_unknown_attributes",
+    "crypto_backend"
 ]
 
 SP_ARGS = [
@@ -91,12 +73,16 @@ SP_ARGS = [
     "allow_unsolicited",
     "ecp",
     "name_id_format",
+    "logout_requests_signed",
+    "requested_attribute_name_format"
 ]
 
 AA_IDP_ARGS = [
     "sign_assertion",
     "sign_response",
     "encrypt_assertion",
+    "encrypted_advice_attributes",
+    "encrypt_assertion_self_contained",
     "want_authn_requests_signed",
     "want_authn_requests_only_with_valid_cert",
     "provided_attributes",
@@ -172,6 +158,7 @@ PREFERRED_BINDING = {
 class ConfigurationError(SAMLError):
     pass
 
+
 # -----------------------------------------------------------------
 
 
@@ -186,7 +173,9 @@ class Config(object):
         self.debug = False
         self.key_file = None
         self.cert_file = None
-        self.encryption_type = 'both'
+        self.encryption_keypairs = None
+        self.additional_cert_files = None
+        self.metadata_key_usage = 'both'
         self.secret = None
         self.accepted_time_diff = None
         self.name = None
@@ -219,7 +208,8 @@ class Config(object):
         self.allow_unsolicited = False
         self.extension_schema = {}
         self.cert_handler_extra_class = None
-        self.verify_encrypt_cert = None
+        self.verify_encrypt_cert_advice = None
+        self.verify_encrypt_cert_assertion = None
         self.generate_cert_func = None
         self.generate_cert_info = None
         self.tmp_cert_file = None
@@ -228,6 +218,7 @@ class Config(object):
         self.extensions = {}
         self.attribute = []
         self.attribute_profile = []
+        self.requested_attribute_name_format = NAME_FORMAT_URI
 
     def setattr(self, context, attr, val):
         if context == "":
@@ -247,9 +238,15 @@ class Config(object):
     def load_special(self, cnf, typ, metadata_construction=False):
         for arg in SPEC[typ]:
             try:
-                self.setattr(typ, arg, cnf[arg])
+                _val = cnf[arg]
             except KeyError:
                 pass
+            else:
+                if _val == "true":
+                    _val = True
+                elif _val == "false":
+                    _val = False
+                self.setattr(typ, arg, _val)
 
         self.context = typ
         self.load_complex(cnf, typ, metadata_construction=metadata_construction)
@@ -296,7 +293,7 @@ class Config(object):
 
     def unicode_convert(self, item):
         try:
-            return unicode(item, "utf-8")
+            return six.text_type(item, "utf-8")
         except TypeError:
             _uc = self.unicode_convert
             if isinstance(item, dict):
@@ -363,14 +360,14 @@ class Config(object):
         else:
             sys.path.insert(0, head)
 
-        return import_module(tail)
+        return importlib.import_module(tail)
 
     def load_file(self, config_file, metadata_construction=False):
         if config_file.endswith(".py"):
             config_file = config_file[:-3]
 
         mod = self._load(config_file)
-        #return self.load(eval(open(config_file).read()))
+        # return self.load(eval(open(config_file).read()))
         return self.load(copy.deepcopy(mod.CONFIG), metadata_construction)
 
     def load_metadata(self, metadata_conf):
@@ -391,8 +388,7 @@ class Config(object):
         except:
             disable_validation = False
 
-        mds = MetadataStore(
-            ONTS.values(), acs, self, ca_certs,
+        mds = MetadataStore(acs, self, ca_certs,
             disable_ssl_certificate_validation=disable_validation)
 
         mds.imp(metadata_conf)
@@ -496,6 +492,22 @@ class Config(object):
     def do_extensions(self, extensions):
         for key, val in extensions.items():
             self.extensions[key] = val
+
+    def service_per_endpoint(self, context=None):
+        """
+        List all endpoint this entity publishes and which service and binding
+        that are behind the endpoint
+
+        :param context: Type of entity
+        :return: Dictionary with endpoint url as key and a tuple of
+            service and binding as value
+        """
+        endps = self.getattr("endpoints", context)
+        res = {}
+        for service, specs in endps.items():
+            for endp, binding in specs:
+                res[endp] = (service, binding)
+        return res
 
 
 class SPConfig(Config):

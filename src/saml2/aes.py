@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 import os
-from Crypto import Random
-from Crypto.Cipher import AES
-from base64 import b64encode, b64decode
+from base64 import b64encode
+from base64 import b64decode
+
+from Cryptodome import Random
+from Cryptodome.Cipher import AES
 
 __author__ = 'rolandh'
 
@@ -87,7 +89,7 @@ class AESCipher(object):
             return cmsg
 
 
-    def decrypt(self, msg, iv=None, padding="PKCS#7", b64dec=True):
+    def decrypt(self, msg, iv=None, alg="aes_128_cbc", padding="PKCS#7", b64dec=True):
         """
         :param key: The encryption key
         :param iv: init vector
@@ -102,7 +104,7 @@ class AESCipher(object):
         _iv = data[:AES.block_size]
         if iv:
             assert iv == _iv
-        cipher, iv = self.build_cipher(iv)
+        cipher, iv = self.build_cipher(iv, alg=alg)
         res = cipher.decrypt(data)[AES.block_size:]
         if padding in ["PKCS#5", "PKCS#7"]:
             res = res[:-ord(res[-1])]

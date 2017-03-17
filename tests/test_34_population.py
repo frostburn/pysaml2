@@ -10,8 +10,9 @@ IDP_OTHER = "urn:mace:example.com:saml:other:idp"
 
 nid = NameID(name_qualifier="foo", format=NAMEID_FORMAT_TRANSIENT, 
              text="123456")
+
 nida = NameID(name_qualifier="foo", format=NAMEID_FORMAT_TRANSIENT,
-             text="abcdef")
+              text="abcdef")
 
 cnid = code(nid)
 cnida = code(nida)
@@ -37,7 +38,7 @@ class TestPopulationMemoryBased():
         self.population.add_information_about_person(session_info)
         
         issuers = self.population.issuers_of_info(nid)
-        assert issuers == [IDP_ONE]
+        assert list(issuers) == [IDP_ONE]
         subjects = [code(c) for c in self.population.subjects()]
         assert subjects == [cnid]
         # Are any of the sources gone stale
@@ -55,8 +56,9 @@ class TestPopulationMemoryBased():
                             'surName': 'Andersson'}
 
         info = self.population.get_info_from(nid, IDP_ONE)
-        assert info.keys() == ["not_on_or_after", "name_id", "ava"]
-        assert info["name_id"] == nid 
+        assert sorted(list(info.keys())) == sorted(["not_on_or_after",
+                                                    "name_id", "ava"])
+        assert info["name_id"] == nid
         assert info["ava"] == {'mail': 'anders.andersson@example.com', 
                                 'givenName': 'Anders', 
                                 'surName': 'Andersson'}
@@ -93,7 +95,8 @@ class TestPopulationMemoryBased():
                             "eduPersonEntitlement": "Anka"}
 
         info = self.population.get_info_from(nid, IDP_OTHER)
-        assert info.keys() == ["not_on_or_after", "name_id", "ava"]
+        assert sorted(list(info.keys())) == sorted(["not_on_or_after",
+                                                    "name_id", "ava"])
         assert info["name_id"] == nid
         assert info["ava"] == {"eduPersonEntitlement": "Anka"}
     
@@ -111,7 +114,7 @@ class TestPopulationMemoryBased():
         self.population.add_information_about_person(session_info)
 
         issuers = self.population.issuers_of_info(nida)
-        assert issuers == [IDP_ONE]
+        assert list(issuers) == [IDP_ONE]
         subjects = [code(c) for c in self.population.subjects()]
         assert _eq(subjects, [cnid, cnida])
         
@@ -130,7 +133,8 @@ class TestPopulationMemoryBased():
                             }
 
         info = self.population.get_info_from(nida, IDP_ONE)
-        assert info.keys() == ["not_on_or_after", "name_id", "ava"]
+        assert sorted(list(info.keys())) == sorted(["not_on_or_after",
+                                                    "name_id", "ava"])
         assert info["name_id"] == nida
         assert info["ava"] == {"givenName": "Bertil",
                                 "surName": "Bertilsson",
@@ -170,6 +174,7 @@ class TestPopulationMemoryBased():
                             "eduPersonEntitlement": "Anka"}
 
         info = self.population.get_info_from(nid, IDP_OTHER)
-        assert info.keys() == ["not_on_or_after", "name_id", "ava"]
+        assert sorted(list(info.keys())) == sorted(["not_on_or_after",
+                                                    "name_id", "ava"])
         assert info["name_id"] == nid
         assert info["ava"] == {"eduPersonEntitlement": "Anka"}

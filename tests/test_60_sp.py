@@ -5,7 +5,7 @@ import base64
 from saml2.authn_context import INTERNETPROTOCOLPASSWORD
 from saml2.saml import NAMEID_FORMAT_TRANSIENT
 from saml2.samlp import NameIDPolicy
-from s2repoze.plugins.sp import make_plugin
+from saml2.s2repoze.plugins.sp import make_plugin
 from saml2.server import Server
 
 ENV1 = {'SERVER_SOFTWARE': 'CherryPy/3.1.2 WSGI Server',
@@ -64,7 +64,7 @@ class TestSP():
             "urn:mace:example.com:saml:roland:sp", trans_name_policy,
             "foba0001@example.com", authn=AUTHN)
 
-        resp_str = base64.encodestring(resp_str)
+        resp_str = base64.encodestring(resp_str.encode('utf-8'))
         self.sp.outstanding_queries = {"id1": "http://www.example.com/service"}
         session_info = self.sp._eval_authn_response(
             {}, {"SAMLResponse": [resp_str]})

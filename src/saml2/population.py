@@ -1,5 +1,7 @@
 import logging
+import six
 from saml2.cache import Cache
+from saml2.ident import code
 
 logger = logging.getLogger(__name__)
 
@@ -7,7 +9,7 @@ logger = logging.getLogger(__name__)
 class Population(object):
     def __init__(self, cache=None):
         if cache:
-            if isinstance(cache, basestring):
+            if isinstance(cache, six.string_types):
                 self.cache = Cache(cache)
             else:
                 self.cache = cache
@@ -18,9 +20,9 @@ class Population(object):
         """If there already are information from this source in the cache
         this function will overwrite that information"""
 
+        session_info = dict(session_info)
         name_id = session_info["name_id"]
-        issuer = session_info["issuer"]
-        del session_info["issuer"]
+        issuer = session_info.pop("issuer")
         self.cache.set(name_id, issuer, session_info,
                        session_info["not_on_or_after"])
         return name_id
@@ -44,8 +46,8 @@ class Population(object):
     def get_identity(self, name_id, entities=None, check_not_on_or_after=True):
         return self.cache.get_identity(name_id, entities, check_not_on_or_after)
 
-    def get_info_from(self, name_id, entity_id):
-        return self.cache.get(name_id, entity_id)
+    def get_info_from(self, name_id, entity_id, check_not_on_or_after=True):
+        return self.cache.get(name_id, entity_id, check_not_on_or_after)
 
     def subjects(self):
         """Returns the name id's for all the persons in the cache"""

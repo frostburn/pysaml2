@@ -1,17 +1,21 @@
 #!/usr/bin/env python
 
 import base64
-from saml2.sigver import pre_encryption_part, make_temp, XmlsecError, \
-    SigverError
-from saml2.mdstore import MetadataStore
-from saml2.saml import assertion_from_string, EncryptedAssertion
-from saml2.samlp import response_from_string
-
-from saml2 import sigver, extension_elements_to_elements
+from saml2.xmldsig import SIG_RSA_SHA256
+from saml2 import sigver
+from saml2 import extension_elements_to_elements
 from saml2 import class_name
 from saml2 import time_util
 from saml2 import saml, samlp
 from saml2 import config
+from saml2.sigver import pre_encryption_part
+from saml2.sigver import make_temp
+from saml2.sigver import XmlsecError
+from saml2.sigver import SigverError
+from saml2.mdstore import MetadataStore
+from saml2.saml import assertion_from_string
+from saml2.saml import EncryptedAssertion
+from saml2.samlp import response_from_string
 from saml2.s_utils import factory, do_attribute_statement
 
 from py.test import raises
@@ -25,6 +29,8 @@ SIMPLE_SAML_PHP_RESPONSE = full_path("simplesamlphp_authnresponse.xml")
 PUB_KEY = full_path("test.pem")
 PRIV_KEY = full_path("test.key")
 
+ENC_PUB_KEY = full_path("pki/test_1.crt")
+ENC_PRIV_KEY = full_path("pki/test.key")
 
 def _eq(l1, l2):
     return set(l1) == set(l2)
@@ -70,7 +76,7 @@ def test_cert_from_instance_1():
     assertion = response.assertion[0]
     certs = sigver.cert_from_instance(assertion)
     assert len(certs) == 1
-    print certs[0]
+    print(certs[0])
     assert certs[0] == CERT1
 
 
@@ -82,7 +88,7 @@ def test_cert_from_instance_ssp():
     assert len(certs) == 1
     assert certs[0] == CERT_SSP
     der = base64.b64decode(certs[0])
-    print str(decoder.decode(der)).replace('.', "\n.")
+    print(str(decoder.decode(der)).replace('.', "\n."))
     assert decoder.decode(der)
 
 
@@ -96,6 +102,8 @@ class FakeConfig():
     metadata = None
     cert_file = PUB_KEY
     key_file = PRIV_KEY
+    encryption_keypairs = [{"key_file": ENC_PRIV_KEY, "cert_file": ENC_PUB_KEY}]
+    enc_key_files = [ENC_PRIV_KEY]
     debug = False
     cert_handler_extra_class = None
     generate_cert_func = None
@@ -103,6 +111,9 @@ class FakeConfig():
     tmp_cert_file = None
     tmp_key_file = None
     validate_certificate = False
+
+    def getattr(self, attr, default):
+        return getattr(self, attr, default)
 
 
 class TestSecurity():
@@ -145,18 +156,18 @@ class TestSecurity():
 
     def test_sign_assertion(self):
         ass = self._assertion
-        print ass
+        print(ass)
         sign_ass = self.sec.sign_assertion("%s" % ass, node_id=ass.id)
-        #print sign_ass
+        #print(sign_ass)
         sass = saml.assertion_from_string(sign_ass)
-        #print sass
+        #print(sass)
         assert _eq(sass.keyswv(), ['attribute_statement', 'issue_instant',
                                    'version', 'signature', 'id'])
         assert sass.version == "2.0"
         assert sass.id == "11111"
         assert time_util.str_to_time(sass.issue_instant)
 
-        print "Crypto version : %s" % (self.sec.crypto.version())
+        print("Crypto version : %s" % (self.sec.crypto.version()))
 
         item = self.sec.check_signature(sass, class_name(sass), sign_ass)
 
@@ -176,7 +187,7 @@ class TestSecurity():
         assert sass.id == "11111"
         assert time_util.str_to_time(sass.issue_instant)
 
-        print "Crypto version : %s" % (self.sec.crypto.version())
+        print("Crypto version : %s" % (self.sec.crypto.version()))
 
         item = self.sec.check_signature(sass, class_name(sass),
                                         sign_ass, must=True)
@@ -234,11 +245,11 @@ class TestSecurity():
         s_response = sigver.signed_instance_factory(response, self.sec, to_sign)
 
         assert s_response is not None
-        print s_response
+        print(s_response)
         response = response_from_string(s_response)
         sass = response.assertion[0]
 
-        print sass
+        print(sass)
         assert _eq(sass.keyswv(), ['attribute_statement', 'issue_instant',
                                    'version', 'signature', 'id'])
         assert sass.version == "2.0"
@@ -299,13 +310,14 @@ class TestSecurity():
         to_sign = [(class_name(self._assertion), self._assertion.id),
                    (class_name(response), response.id)]
 
-        s_response = sigver.signed_instance_factory(response, self.sec, to_sign)
+        s_response = sigver.signed_instance_factory(response, self.sec,
+                                                    to_sign)
 
-        print s_response
-        res = self.sec.verify_signature("%s" % s_response,
+        print(s_response)
+        res = self.sec.verify_signature(s_response,
                                         node_name=class_name(samlp.Response()))
 
-        print res
+        print(res)
         assert res
 
     def test_sign_verify_with_cert_from_instance(self):
@@ -327,7 +339,7 @@ class TestSecurity():
 
         assert ci == self.sec.my_cert
 
-        res = self.sec.verify_signature("%s" % s_response,
+        res = self.sec.verify_signature(s_response,
                                         node_name=class_name(samlp.Response()))
 
         assert res
@@ -353,12 +365,12 @@ class TestSecurity():
         to_sign = [(class_name(assertion), assertion.id)]
         s_assertion = sigver.signed_instance_factory(assertion, self.sec,
                                                      to_sign)
-        print s_assertion
+        print(s_assertion)
         ass = assertion_from_string(s_assertion)
         ci = "".join(sigver.cert_from_instance(ass)[0].split())
         assert ci == self.sec.my_cert
 
-        res = self.sec.verify_signature("%s" % s_assertion,
+        res = self.sec.verify_signature(s_assertion,
                                         node_name=class_name(ass))
         assert res
 
@@ -447,9 +459,9 @@ def test_xbox():
     encrypted_assertion = EncryptedAssertion()
     encrypted_assertion.add_extension_element(_ass0)
 
-    _, pre = make_temp("%s" % pre_encryption_part(), decode=False)
+    _, pre = make_temp(str(pre_encryption_part()).encode('utf-8'), decode=False)
     enctext = sec.crypto.encrypt(
-        "%s" % encrypted_assertion, conf.cert_file, pre, "des-192",
+        str(encrypted_assertion), conf.cert_file, pre, "des-192",
         '/*[local-name()="EncryptedAssertion"]/*[local-name()="Assertion"]')
 
 
@@ -470,7 +482,7 @@ def test_xbox():
         if _txt:
             assertions.append(ass)
 
-    print assertions
+    print(assertions)
 
 
 def test_xmlsec_err():
@@ -502,9 +514,49 @@ def test_xmlsec_err():
         assert False
 
 
+def test_sha256_signing():
+    conf = config.SPConfig()
+    conf.load_file("server_conf")
+    md = MetadataStore([saml, samlp], None, conf)
+    md.load("local", full_path("idp_example.xml"))
+
+    conf.metadata = md
+    conf.only_use_keys_in_metadata = False
+    sec = sigver.security_context(conf)
+
+    assertion = factory(
+        saml.Assertion, version="2.0", id="11111",
+        issue_instant="2009-10-30T13:20:28Z",
+        signature=sigver.pre_signature_part("11111", sec.my_cert, 1,
+                                            sign_alg=SIG_RSA_SHA256),
+        attribute_statement=do_attribute_statement(
+            {("", "", "surName"): ("Foo", ""),
+             ("", "", "givenName"): ("Bar", ""), })
+    )
+
+    s = sec.sign_statement(assertion, class_name(assertion),
+                           key_file=full_path("test.key"),
+                           node_id=assertion.id)
+    assert s
+
+
+def test_xmlsec_output_line_parsing():
+    output1 = "prefix\nOK\npostfix"
+    assert sigver.parse_xmlsec_output(output1)
+
+    output2 = "prefix\nFAIL\npostfix"
+    raises(sigver.XmlsecError, sigver.parse_xmlsec_output, output2)
+
+    output3 = "prefix\r\nOK\r\npostfix"
+    assert sigver.parse_xmlsec_output(output3)
+
+    output4 = "prefix\r\nFAIL\r\npostfix"
+    raises(sigver.XmlsecError, sigver.parse_xmlsec_output, output4)
+
+
 if __name__ == "__main__":
     # t = TestSecurity()
     # t.setup_class()
-    # t.test_non_verify_2()
+    # t.test_sign_assertion()
 
-    test_xmlsec_err()
+    test_sha256_signing()

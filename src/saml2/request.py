@@ -1,6 +1,6 @@
 import logging
 
-from attribute_converter import to_local
+from saml2.attribute_converter import to_local
 from saml2 import time_util, BINDING_HTTP_REDIRECT
 from saml2.s_utils import OtherError
 
@@ -43,27 +43,27 @@ class Request(object):
 
         # own copy
         self.xmlstr = xmldata[:]
-        logger.debug("xmlstr: %s" % (self.xmlstr,))
+        logger.debug("xmlstr: %s", self.xmlstr)
         try:
             self.message = self.signature_check(xmldata, origdoc=origdoc,
                                                 must=must,
                                                 only_valid_cert=only_valid_cert)
         except TypeError:
             raise
-        except Exception, excp:
+        except Exception as excp:
             logger.info("EXCEPTION: %s", excp)
 
         if not self.message:
             logger.error("Response was not correctly signed")
-            logger.info(xmldata)
+            logger.info("Response: %s", xmldata)
             raise IncorrectlySigned()
 
-        logger.info("request: %s" % (self.message,))
+        logger.info("request: %s", self.message)
 
         try:
             valid_instance(self.message)
-        except NotValid, exc:
-            logger.error("Not valid request: %s" % exc.args[0])
+        except NotValid as exc:
+            logger.error("Not valid request: %s", exc.args[0])
             raise
 
         return self
@@ -74,8 +74,8 @@ class Request(object):
                                      self.timeslack).timetuple()
         lower = time_util.shift_time(time_util.time_a_while_ago(days=1),
                                      - self.timeslack).timetuple()
-        # print "issue_instant: %s" % self.message.issue_instant
-        # print "%s < x < %s" % (lower, upper)
+        # print("issue_instant: %s" % self.message.issue_instant)
+        # print("%s < x < %s" % (lower, upper))
         issued_at = time_util.str_to_time(self.message.issue_instant)
         return issued_at > lower and issued_at < upper
 
@@ -83,8 +83,8 @@ class Request(object):
         assert self.message.version == "2.0"
         if self.message.destination and self.receiver_addrs and \
                 self.message.destination not in self.receiver_addrs:
-            logger.error("%s not in %s" % (self.message.destination,
-                                                self.receiver_addrs))
+            logger.error("%s not in %s", self.message.destination,
+                                         self.receiver_addrs)
             raise OtherError("Not destined for me!")
 
         assert self.issue_instant_ok()

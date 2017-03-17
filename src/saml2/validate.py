@@ -1,11 +1,11 @@
 import calendar
-import urlparse
+from six.moves.urllib.parse import urlparse
 import re
-import time_util
 import struct
 import base64
 
-# Also defined in saml2.saml but can't import from there
+from saml2 import time_util
+
 XSI_NAMESPACE = 'http://www.w3.org/2001/XMLSchema-instance'
 XSI_NIL = '{%s}nil' % XSI_NAMESPACE
 # ---------------------------------------------------------
@@ -24,6 +24,14 @@ class MustValueError(ValueError):
 
 
 class ShouldValueError(ValueError):
+    pass
+
+
+class ResponseLifetimeExceed(Exception):
+    pass
+
+
+class ToEarly(Exception):
     pass
 
 # --------------------- validators -------------------------------------
@@ -46,7 +54,7 @@ def valid_id(oid):
 def valid_any_uri(item):
     """very simplistic, ..."""
     try:
-        part = urlparse.urlparse(item)
+        part = urlparse(item)
     except Exception:
         raise NotValid("AnyURI")
 
@@ -82,8 +90,8 @@ def validate_on_or_after(not_on_or_after, slack):
         now = time_util.utc_now()
         nooa = calendar.timegm(time_util.str_to_time(not_on_or_after))
         if now > nooa + slack:
-            raise Exception("Can't use it, it's too old %d > %d" %
-                            (nooa, now))
+            raise ResponseLifetimeExceed(
+                "Can't use it, it's too old %d > %d" % (now - slack, nooa))
         return nooa
     else:
         return False
@@ -94,7 +102,7 @@ def validate_before(not_before, slack):
         now = time_util.utc_now()
         nbefore = calendar.timegm(time_util.str_to_time(not_before))
         if nbefore > now + slack:
-            raise Exception("Can't use it yet %d <= %d" % (nbefore, now))
+            raise ToEarly("Can't use it yet %d <= %d" % (now + slack, nbefore))
 
     return True
 
@@ -305,7 +313,7 @@ def validate_value_type(value, spec):
         {'base': 'string'}
     """
     if "maxlen" in spec:
-        return len(value) <= spec["maxlen"]
+        return len(value) <= int(spec["maxlen"])
 
     if spec["base"] == "string":
         if "enumeration" in spec:
@@ -337,10 +345,10 @@ def valid(typ, value):
 def _valid_instance(instance, val):
     try:
         val.verify()
-    except NotValid, exc:
+    except NotValid as exc:
         raise NotValid("Class '%s' instance: %s" % (
             instance.__class__.__name__, exc.args[0]))
-    except OutsideCardinality, exc:
+    except OutsideCardinality as exc:
         raise NotValid(
             "Class '%s' instance cardinality error: %s" % (
                 instance.__class__.__name__, exc.args[0]))
@@ -361,7 +369,7 @@ def valid_instance(instance):
         try:
             validate_value_type(instance.text.strip(),
                                 instclass.c_value_type)
-        except NotValid, exc:
+        except NotValid as exc:
             raise NotValid("Class '%s' instance: %s" % (class_name,
                                                         exc.args[0]))
 
@@ -382,7 +390,7 @@ def valid_instance(instance):
                     validate_value_type(value, spec)
                 else:
                     valid(typ, value)
-            except (NotValid, ValueError), exc:
+            except (NotValid, ValueError) as exc:
                 txt = ERROR_TEXT % (value, name, exc.args[0])
                 raise NotValid("Class '%s' instance: %s" % (class_name, txt))
 
@@ -447,6 +455,6 @@ def valid_instance(instance):
 def valid_domain_name(dns_name):
     m = re.match(
         "^[a-z0-9]+([-.]{ 1 }[a-z0-9]+).[a-z]{2,5}(:[0-9]{1,5})?(\/.)?$",
-        dns_name, "ix")
+        dns_name, re.I)
     if not m:
         raise ValueError("Not a proper domain name")

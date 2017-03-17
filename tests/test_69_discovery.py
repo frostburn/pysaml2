@@ -41,7 +41,7 @@ def test_construct_deconstruct_request():
         returnIDParam="foo",
         return_url="https://example.com/saml/sp/disc")
 
-    print url
+    print(url)
 
     ds = DiscoveryServer(config_file=dotname("disco_conf"))
     dsr = ds.parse_discovery_service_request(url)
@@ -69,4 +69,4 @@ def test_construct_deconstruct_response():
 
 
 if __name__ == "__main__":
-    test_construct_deconstruct_request()
+    test_verify()

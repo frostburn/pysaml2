@@ -5,27 +5,34 @@
 """ Functions connected to signing and verifying.
 Based on the use of xmlsec1 binaries and not the python xmlsec module.
 """
+from OpenSSL import crypto
 
 import base64
-from binascii import hexlify
 import hashlib
 import logging
-import random
 import os
 import ssl
+import six
+
 from time import mktime
-import urllib
-from Crypto.PublicKey.RSA import importKey
-from Crypto.Signature import PKCS1_v1_5
-from Crypto.Util.asn1 import DerSequence
-from Crypto.PublicKey import RSA
-from saml2.cert import OpenSSLWrapper
-from saml2.extension import pefim
-from saml2.saml import EncryptedAssertion
+from binascii import hexlify
 
-import xmldsig as ds
+from future.backports.urllib.parse import urlencode
 
-from saml2 import samlp, SamlBase
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.asymmetric.padding import PKCS1v15
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
+from cryptography.x509 import load_pem_x509_certificate
+
+from tempfile import NamedTemporaryFile
+from subprocess import Popen
+from subprocess import PIPE
+
+from saml2 import samlp
+from saml2 import SamlBase
 from saml2 import SAMLError
 from saml2 import extension_elements_to_elements
 from saml2 import class_name
@@ -33,32 +40,30 @@ from saml2 import saml
 from saml2 import ExtensionElement
 from saml2 import VERSION
 
-from saml2.s_utils import sid, rndstr
+from saml2.cert import OpenSSLWrapper
+from saml2.extension import pefim
+from saml2.extension.pefim import SPCertEnc
+from saml2.saml import EncryptedAssertion
+
+import saml2.xmldsig as ds
+
+from saml2.s_utils import sid
 from saml2.s_utils import Unsupported
 
 from saml2.time_util import instant
 from saml2.time_util import utc_now
 from saml2.time_util import str_to_time
 
-from tempfile import NamedTemporaryFile
-from subprocess import Popen, PIPE
-
-from xmldsig import SIG_RSA_SHA1
-from xmldsig import SIG_RSA_SHA224
-from xmldsig import SIG_RSA_SHA256
-from xmldsig import SIG_RSA_SHA384
-from xmldsig import SIG_RSA_SHA512
-from xmlenc import EncryptionMethod
-from xmlenc import EncryptedKey
-from xmlenc import CipherData
-from xmlenc import CipherValue
-from xmlenc import EncryptedData
-
-from Crypto.Hash import SHA
-from Crypto.Hash import SHA224
-from Crypto.Hash import SHA256
-from Crypto.Hash import SHA384
-from Crypto.Hash import SHA512
+from saml2.xmldsig import SIG_RSA_SHA1
+from saml2.xmldsig import SIG_RSA_SHA224
+from saml2.xmldsig import SIG_RSA_SHA256
+from saml2.xmldsig import SIG_RSA_SHA384
+from saml2.xmldsig import SIG_RSA_SHA512
+from saml2.xmlenc import EncryptionMethod
+from saml2.xmlenc import EncryptedKey
+from saml2.xmlenc import CipherData
+from saml2.xmlenc import CipherValue
+from saml2.xmlenc import EncryptedData
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +74,8 @@ TRIPLE_DES_CBC = "http://www.w3.org/2001/04/xmlenc#tripledes-cbc"
 XMLTAG = "<?xml version='1.0'?>"
 PREFIX1 = "<?xml version='1.0' encoding='UTF-8'?>"
 PREFIX2 = '<?xml version="1.0" encoding="UTF-8"?>'
+
+backend = default_backend()
 
 
 class SigverError(SAMLError):
@@ -137,6 +144,12 @@ def rm_xmltag(statement):
 
 
 def signed(item):
+    """
+    Is any part of the document signed ?
+
+    :param item: A Samlbase instance
+    :return: True if some part of it is signed
+    """
     if SIG in item.c_children.keys() and item.signature:
         return True
     else:
@@ -229,7 +242,7 @@ def _make_vals(val, klass, seccont, klass_inst=None, prop=None, part=False,
     """
     cinst = None
 
-    #print "make_vals(%s, %s)" % (val, klass)
+    # print("make_vals(%s, %s)" % (val, klass))
 
     if isinstance(val, dict):
         cinst = _instance(klass, val, seccont, base64encode=base64encode,
@@ -258,10 +271,10 @@ def _instance(klass, ava, seccont, base64encode=False, elements_to_sign=None):
     instance = klass()
 
     for prop in instance.c_attributes.values():
-        #print "# %s" % (prop)
+        # print("# %s" % (prop))
         if prop in ava:
             if isinstance(ava[prop], bool):
-                setattr(instance, prop, "%s" % ava[prop])
+                setattr(instance, prop, str(ava[prop]).encode('utf-8'))
             elif isinstance(ava[prop], int):
                 setattr(instance, prop, "%d" % ava[prop])
             else:
@@ -271,9 +284,9 @@ def _instance(klass, ava, seccont, base64encode=False, elements_to_sign=None):
         instance.set_text(ava["text"], base64encode)
 
     for prop, klassdef in instance.c_children.values():
-        #print "## %s, %s" % (prop, klassdef)
+        # print("## %s, %s" % (prop, klassdef))
         if prop in ava:
-            #print "### %s" % ava[prop]
+            # print("### %s" % ava[prop])
             if isinstance(klassdef, list):
                 # means there can be a list of values
                 _make_vals(ava[prop], klassdef[0], seccont, instance, prop,
@@ -308,14 +321,14 @@ def signed_instance_factory(instance, seccont, elements_to_sign=None):
     :return: A class instance if not signed otherwise a string
     """
     if elements_to_sign:
-        signed_xml = "%s" % instance
+        signed_xml = str(instance)
         for (node_name, nodeid) in elements_to_sign:
             signed_xml = seccont.sign_statement(
                 signed_xml, node_name=node_name, node_id=nodeid)
 
-        #print "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-        #print "%s" % signed_xml
-        #print "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        # print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+        # print("%s" % signed_xml)
+        # print("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
         return signed_xml
     else:
         return instance
@@ -346,6 +359,10 @@ def make_temp(string, suffix="", decode=True, delete=True):
         xmlsec function).
     """
     ntf = NamedTemporaryFile(suffix=suffix, delete=delete)
+    # Python3 tempfile requires byte-like object
+    if not isinstance(string, six.binary_type):
+        string = string.encode("utf8")
+
     if decode:
         ntf.write(base64.b64decode(string))
     else:
@@ -356,6 +373,7 @@ def make_temp(string, suffix="", decode=True, delete=True):
 
 def split_len(seq, length):
     return [seq[i:i + length] for i in range(0, len(seq), length)]
+
 
 # --------------------------------------------------------------------------
 
@@ -376,13 +394,11 @@ def active_cert(key):
     :param key: The Key
     :return: True if the key is active else False
     """
-    cert_str = pem_format(key)
-    certificate = importKey(cert_str)
     try:
-        not_before = to_time(str(certificate.get_not_before()))
-        not_after = to_time(str(certificate.get_not_after()))
-        assert not_before < utc_now()
-        assert not_after > utc_now()
+        cert_str = pem_format(key)
+        cert = crypto.load_certificate(crypto.FILETYPE_PEM, cert_str)
+        assert cert.has_expired() == 0
+        assert not OpenSSLWrapper().certificate_not_valid_yet(cert)
         return True
     except AssertionError:
         return False
@@ -403,7 +419,7 @@ def cert_from_key_info(key_info, ignore_age=False):
     """
     res = []
     for x509_data in key_info.x509_data:
-        #print "X509Data",x509_data
+        # print("X509Data",x509_data)
         x509_certificate = x509_data.x509_certificate
         cert = x509_certificate.text.strip()
         cert = "\n".join(split_len("".join([s.strip() for s in
@@ -500,13 +516,13 @@ def key_from_key_value_dict(key_info):
 # =============================================================================
 
 
-#def rsa_load(filename):
+# def rsa_load(filename):
 #    """Read a PEM-encoded RSA key pair from a file."""
 #    return M2Crypto.RSA.load_key(filename, M2Crypto.util
 # .no_passphrase_callback)
 #
 #
-#def rsa_loads(key):
+# def rsa_loads(key):
 #    """Read a PEM-encoded RSA key pair from a string."""
 #    return M2Crypto.RSA.load_key_string(key,
 #                                        M2Crypto.util.no_passphrase_callback)
@@ -521,28 +537,17 @@ def rsa_eq(key1, key2):
 
 
 def extract_rsa_key_from_x509_cert(pem):
-    # Convert from PEM to DER
-    der = ssl.PEM_cert_to_DER_cert(pem)
-
-    # Extract subjectPublicKeyInfo field from X.509 certificate (see RFC3280)
-    cert = DerSequence()
-    cert.decode(der)
-    tbsCertificate = DerSequence()
-    tbsCertificate.decode(cert[0])
-    subjectPublicKeyInfo = tbsCertificate[6]
-
-    # Initialize RSA key
-    rsa_key = RSA.importKey(subjectPublicKeyInfo)
-    return rsa_key
+    cert = load_pem_x509_certificate(pem, backend)
+    return cert.public_key()
 
 
 def pem_format(key):
     return "\n".join(["-----BEGIN CERTIFICATE-----",
-                      key, "-----END CERTIFICATE-----"])
+                      key, "-----END CERTIFICATE-----"]).encode('ascii')
 
 
 def import_rsa_key_from_file(filename):
-    return RSA.importKey(read_file(filename, 'r'))
+    return load_pem_private_key(read_file(filename, 'rb'), None, backend)
 
 
 def parse_xmlsec_output(output):
@@ -552,7 +557,7 @@ def parse_xmlsec_output(output):
     :param output: The output from Popen
     :return: A boolean; True if the command was a success otherwise False
     """
-    for line in output.split("\n"):
+    for line in output.splitlines():
         if line == "OK":
             return True
         elif line == "FAIL":
@@ -567,6 +572,9 @@ def sha1_digest(msg):
 class Signer(object):
     """Abstract base class for signing algorithms."""
 
+    def __init__(self, key):
+        self.key = key
+
     def sign(self, msg, key):
         """Sign ``msg`` with ``key`` and return the signature."""
         raise NotImplementedError
@@ -577,33 +585,61 @@ class Signer(object):
 
 
 class RSASigner(Signer):
-    def __init__(self, digest):
+    def __init__(self, digest, key=None):
+        Signer.__init__(self, key)
         self.digest = digest
 
-    def sign(self, msg, key):
-        h = self.digest.new(msg)
-        signer = PKCS1_v1_5.new(key)
-        return signer.sign(h)
+    def sign(self, msg, key=None):
+        if key is None:
+            key = self.key
 
-    def verify(self, msg, sig, key):
-        h = self.digest.new(msg)
-        verifier = PKCS1_v1_5.new(key)
-        return verifier.verify(h, sig)
+        return key.sign(msg, PKCS1v15(), self.digest)
+
+    def verify(self, msg, sig, key=None):
+        if key is None:
+            key = self.key
+
+        try:
+            if isinstance(key, rsa.RSAPrivateKey):
+                key = key.public_key()
+
+            key.verify(sig, msg, PKCS1v15(), self.digest)
+            return True
+        except InvalidSignature:
+            return False
 
 
 SIGNER_ALGS = {
-    SIG_RSA_SHA1: RSASigner(SHA),
-    SIG_RSA_SHA224: RSASigner(SHA224),
-    SIG_RSA_SHA256: RSASigner(SHA256),
-    SIG_RSA_SHA384: RSASigner(SHA384),
-    SIG_RSA_SHA512: RSASigner(SHA512),
+    SIG_RSA_SHA1: RSASigner(hashes.SHA1()),
+    SIG_RSA_SHA224: RSASigner(hashes.SHA224()),
+    SIG_RSA_SHA256: RSASigner(hashes.SHA256()),
+    SIG_RSA_SHA384: RSASigner(hashes.SHA384()),
+    SIG_RSA_SHA512: RSASigner(hashes.SHA512()),
 }
 
 REQ_ORDER = ["SAMLRequest", "RelayState", "SigAlg"]
 RESP_ORDER = ["SAMLResponse", "RelayState", "SigAlg"]
 
 
-def verify_redirect_signature(saml_msg, cert=None, sigkey=None):
+class RSACrypto(object):
+    def __init__(self, key):
+        self.key = key
+
+    def get_signer(self, sigalg, sigkey=None):
+        try:
+            signer = SIGNER_ALGS[sigalg]
+        except KeyError:
+            return None
+        else:
+            if sigkey:
+                signer.key = sigkey
+            else:
+                signer.key = self.key
+
+        return signer
+
+
+def verify_redirect_signature(saml_msg, crypto, cert=None, sigkey=None):
     """
 
     :param saml_msg: A dictionary with strings as values, *NOT* lists as
@@ -613,7 +649,7 @@ def verify_redirect_signature(saml_msg, cert=None, sigkey=None):
     """
 
     try:
-        signer = SIGNER_ALGS[saml_msg["SigAlg"]]
+        signer = crypto.get_signer(saml_msg["SigAlg"], sigkey)
     except KeyError:
         raise Unsupported("Signature algorithm: %s" % saml_msg["SigAlg"])
     else:
@@ -629,11 +665,14 @@ def verify_redirect_signature(saml_msg, cert=None, sigkey=None):
             _args = saml_msg.copy()
             del _args["Signature"]  # everything but the signature
             string = "&".join(
-                [urllib.urlencode({k: _args[k]}) for k in _order if k in _args])
+                [urlencode({k: _args[k]}) for k in _order if k in
+                 _args]).encode('ascii')
+
             if cert:
                 _key = extract_rsa_key_from_x509_cert(pem_format(cert))
             else:
                 _key = sigkey
+
             _sign = base64.b64decode(saml_msg["Signature"])
 
             return bool(signer.verify(string, _sign, _key))
@@ -641,6 +680,13 @@ def verify_redirect_signature(saml_msg, cert=None, sigkey=None):
 
 LOG_LINE = 60 * "=" + "\n%s\n" + 60 * "-" + "\n%s" + 60 * "="
 LOG_LINE_2 = 60 * "=" + "\n%s\n%s\n" + 60 * "-" + "\n%s" + 60 * "="
+
+
+def make_str(txt):
+    if isinstance(txt, six.string_types):
+        return txt
+    else:
+        return txt.decode("utf8")
 
 
 # ---------------------------------------------------------------------------
@@ -655,34 +701,35 @@ def read_cert_from_file(cert_file, cert_type):
     :return: A base64 encoded certificate as a string or the empty string
     """
 
-
     if not cert_file:
         return ""
 
     if cert_type == "pem":
-        line = open(cert_file).read().replace("\r\n", "\n").split("\n")
+        _a = read_file(cert_file, 'rb').decode("utf8")
+        _b = _a.replace("\r\n", "\n")
+        lines = _b.split("\n")
 
-        if line[0] == "-----BEGIN CERTIFICATE-----":
-            line = line[1:]
-        elif line[0] == "-----BEGIN PUBLIC KEY-----":
-            line = line[1:]
+        for pattern in ("-----BEGIN CERTIFICATE-----",
+                        "-----BEGIN PUBLIC KEY-----"):
+            if pattern in lines:
+                lines = lines[lines.index(pattern) + 1:]
+                break
         else:
             raise CertificateError("Strange beginning of PEM file")
 
-        while line[-1] == "":
-            line = line[:-1]
-
-        if line[-1] == "-----END CERTIFICATE-----":
-            line = line[:-1]
-        elif line[-1] == "-----END PUBLIC KEY-----":
-            line = line[:-1]
+        for pattern in ("-----END CERTIFICATE-----",
+                        "-----END PUBLIC KEY-----"):
+            if pattern in lines:
+                lines = lines[:lines.index(pattern)]
+                break
         else:
             raise CertificateError("Strange end of PEM file")
-        return "".join(line)
+        return make_str("".join(lines).encode("utf8"))
 
     if cert_type in ["der", "cer", "crt"]:
-        data = read_file(cert_file)
-        return base64.b64encode(str(data))
+        data = read_file(cert_file, 'rb')
+        _cert = base64.b64encode(data)
+        return make_str(_cert)
 
 
 class CryptoBackend():
@@ -725,18 +772,25 @@ class CryptoBackendXmlSec1(CryptoBackend):
 
     def __init__(self, xmlsec_binary, **kwargs):
         CryptoBackend.__init__(self, **kwargs)
-        assert (isinstance(xmlsec_binary, basestring))
+        assert (isinstance(xmlsec_binary, six.string_types))
         self.xmlsec = xmlsec_binary
         if os.environ.get('PYSAML2_KEEP_XMLSEC_TMP', None):
             self._xmlsec_delete_tmpfiles = False
         else:
             self._xmlsec_delete_tmpfiles = True
 
+        try:
+            self.non_xml_crypto = RSACrypto(kwargs['rsa_key'])
+        except KeyError:
+            pass
+
     def version(self):
         com_list = [self.xmlsec, "--version"]
         pof = Popen(com_list, stderr=PIPE, stdout=PIPE)
+        content = pof.stdout.read().decode('ascii')
+        pof.wait()
         try:
-            return pof.stdout.read().split(" ")[1]
+            return content.split(" ")[1]
         except IndexError:
             return ""
 
@@ -751,8 +805,8 @@ class CryptoBackendXmlSec1(CryptoBackend):
         :param xpath: What should be encrypted
         :return:
         """
-        logger.debug("Encryption input len: %d" % len(text))
-        _, fil = make_temp("%s" % text, decode=False)
+        logger.debug("Encryption input len: %d", len(text))
+        _, fil = make_temp(str(text).encode('utf-8'), decode=False)
 
         com_list = [self.xmlsec, "--encrypt", "--pubkey-cert-pem", recv_key,
                     "--session-key", session_key_type, "--xml-data", fil]
@@ -763,10 +817,12 @@ class CryptoBackendXmlSec1(CryptoBackend):
         (_stdout, _stderr, output) = self._run_xmlsec(com_list, [template],
                                                       exception=DecryptError,
                                                       validate_output=False)
+        if isinstance(output, six.binary_type):
+            output = output.decode('utf-8')
         return output
 
     def encrypt_assertion(self, statement, enc_key, template,
-                          key_type="des-192", node_xpath=None):
+                          key_type="des-192", node_xpath=None, node_id=None):
         """
         Will encrypt an assertion
 
@@ -780,8 +836,9 @@ class CryptoBackendXmlSec1(CryptoBackend):
         if isinstance(statement, SamlBase):
             statement = pre_encrypt_assertion(statement)
 
-        _, fil = make_temp("%s" % statement, decode=False, delete=False)
-        _, tmpl = make_temp("%s" % template, decode=False)
+        _, fil = make_temp(str(statement).encode('utf-8'), decode=False,
+                           delete=False)
+        _, tmpl = make_temp(str(template).encode('utf-8'), decode=False)
 
         if not node_xpath:
             node_xpath = ASSERT_XPATH
@@ -789,6 +846,8 @@ class CryptoBackendXmlSec1(CryptoBackend):
         com_list = [self.xmlsec, "encrypt", "--pubkey-cert-pem", enc_key,
                     "--session-key", key_type, "--xml-data", fil,
                     "--node-xpath", node_xpath]
+        if node_id:
+            com_list.extend(["--node-id", node_id])
 
         (_stdout, _stderr, output) = self._run_xmlsec(
             com_list, [tmpl], exception=EncryptError, validate_output=False)
@@ -797,7 +856,7 @@ class CryptoBackendXmlSec1(CryptoBackend):
         if not output:
             raise EncryptError(_stderr)
 
-        return output
+        return output.decode('utf-8')
 
     def decrypt(self, enctext, key_file):
         """
@@ -807,8 +866,8 @@ class CryptoBackendXmlSec1(CryptoBackend):
         :return: The decrypted document
         """
 
-        logger.debug("Decrypt input len: %d" % len(enctext))
-        _, fil = make_temp("%s" % enctext, decode=False)
+        logger.debug("Decrypt input len: %d", len(enctext))
+        _, fil = make_temp(str(enctext).encode('utf-8'), decode=False)
 
         com_list = [self.xmlsec, "--decrypt", "--privkey-pem",
                     key_file, "--id-attr:%s" % ID_ATTR, ENC_KEY_CLASS]
@@ -816,7 +875,7 @@ class CryptoBackendXmlSec1(CryptoBackend):
         (_stdout, _stderr, output) = self._run_xmlsec(com_list, [fil],
                                                       exception=DecryptError,
                                                       validate_output=False)
-        return output
+        return output.decode('utf-8')
 
     def sign_statement(self, statement, node_name, key_file, node_id,
                        id_attr):
@@ -831,9 +890,11 @@ class CryptoBackendXmlSec1(CryptoBackend):
             'id','Id' or 'ID'
         :return: The signed statement
         """
+        if isinstance(statement, SamlBase):
+            statement = str(statement)
 
-        _, fil = make_temp("%s" % statement, suffix=".xml", decode=False, 
-                           delete=self._xmlsec_delete_tmpfiles)
+        _, fil = make_temp(statement, suffix=".xml",
+                           decode=False, delete=self._xmlsec_delete_tmpfiles)
 
         com_list = [self.xmlsec, "--sign",
                     "--privkey-pem", key_file,
@@ -847,10 +908,10 @@ class CryptoBackendXmlSec1(CryptoBackend):
             # this doesn't work if --store-signatures are used
             if stdout == "":
                 if signed_statement:
-                    return signed_statement
+                    return signed_statement.decode('utf-8')
             logger.error(
-                "Signing operation failed :\nstdout : %s\nstderr : %s" % (
-                    stdout, stderr))
+                "Signing operation failed :\nstdout : %s\nstderr : %s",
+                stdout, stderr)
             raise SigverError(stderr)
         except DecryptError:
             raise SigverError("Signing failed")
@@ -868,6 +929,8 @@ class CryptoBackendXmlSec1(CryptoBackend):
         :param id_attr: Should normally be one of "id", "Id" or "ID"
         :return: Boolean True if the signature was correct otherwise False.
         """
+        if not isinstance(signedtext, six.binary_type):
+            signedtext = signedtext.encode('utf-8')
         _, fil = make_temp(signedtext, suffix=".xml",
                            decode=False, delete=self._xmlsec_delete_tmpfiles)
 
@@ -883,15 +946,15 @@ class CryptoBackendXmlSec1(CryptoBackend):
 
         if self.__DEBUG:
             try:
-                print " ".join(com_list)
+                print(" ".join(com_list))
             except TypeError:
-                print "cert_type", cert_type
-                print "cert_file", cert_file
-                print "node_name", node_name
-                print "fil", fil
+                print("cert_type", cert_type)
+                print("cert_file", cert_file)
+                print("node_name", node_name)
+                print("fil", fil)
                 raise
-            print "%s: %s" % (cert_file, os.access(cert_file, os.F_OK))
-            print "%s: %s" % (fil, os.access(fil, os.F_OK))
+            print("%s: %s" % (cert_file, os.access(cert_file, os.F_OK)))
+            print("%s: %s" % (fil, os.access(fil, os.F_OK)))
 
         (_stdout, stderr, _output) = self._run_xmlsec(com_list, [fil],
                                                       exception=SignatureError)
@@ -913,22 +976,23 @@ class CryptoBackendXmlSec1(CryptoBackend):
         com_list.extend(["--output", ntf.name])
         com_list += extra_args
 
-        logger.debug("xmlsec command: %s" % " ".join(com_list))
+        logger.debug("xmlsec command: %s", " ".join(com_list))
 
         pof = Popen(com_list, stderr=PIPE, stdout=PIPE)
 
-        p_out = pof.stdout.read()
-        p_err = pof.stderr.read()
+        p_out = pof.stdout.read().decode('utf-8')
+        p_err = pof.stderr.read().decode('utf-8')
+        pof.wait()
 
         if pof.returncode is not None and pof.returncode < 0:
-            logger.error(LOG_LINE % (p_out, p_err))
+            logger.error(LOG_LINE, p_out, p_err)
             raise XmlsecError("%d:%s" % (pof.returncode, p_err))
 
         try:
             if validate_output:
                 parse_xmlsec_output(p_err)
-        except XmlsecError, exc:
-            logger.error(LOG_LINE_2 % (p_out, p_err, exc))
+        except XmlsecError as exc:
+            logger.error(LOG_LINE_2, p_out, p_err, exc)
             raise
 
         ntf.seek(0)
@@ -1006,7 +1070,7 @@ class CryptoBackendXMLSecurity(CryptoBackend):
 def security_context(conf, debug=None):
     """ Creates a security context based on the configuration
 
-    :param conf: The configuration
+    :param conf: The configuration, this is a Config instance
     :return: A SecurityContext instance
     """
     if not conf:
@@ -1027,6 +1091,8 @@ def security_context(conf, debug=None):
     if _only_md is None:
         _only_md = False
 
+    sec_backend = None
+
     if conf.crypto_backend == 'xmlsec1':
         xmlsec_binary = conf.xmlsec_binary
         if not xmlsec_binary:
@@ -1037,16 +1103,33 @@ def security_context(conf, debug=None):
             xmlsec_binary = get_xmlsec_binary(_path)
             # verify that xmlsec is where it's supposed to be
         if not os.path.exists(xmlsec_binary):
-            #if not os.access(, os.F_OK):
+            # if not os.access(, os.F_OK):
             raise SigverError(
                 "xmlsec binary not in '%s' !" % xmlsec_binary)
         crypto = _get_xmlsec_cryptobackend(xmlsec_binary, debug=debug)
+        _file_name = conf.getattr("key_file", "")
+        if _file_name:
+            try:
+                rsa_key = import_rsa_key_from_file(_file_name)
+            except Exception as err:
+                logger.error("Could not import key from {}: {}".format(_file_name,
+                                                                       err))
+                raise
+            else:
+                sec_backend = RSACrypto(rsa_key)
     elif conf.crypto_backend == 'XMLSecurity':
         # new and somewhat untested pyXMLSecurity crypto backend.
         crypto = CryptoBackendXMLSecurity(debug=debug)
     else:
         raise SigverError('Unknown crypto_backend %s' % (
             repr(conf.crypto_backend)))
+
+
+    enc_key_files = []
+    if conf.encryption_keypairs is not None:
+        for _encryption_keypair in conf.encryption_keypairs:
+            if "key_file" in _encryption_keypair:
+                enc_key_files.append(_encryption_keypair["key_file"])
 
     return SecurityContext(
         crypto, conf.key_file, cert_file=conf.cert_file, metadata=metadata,
@@ -1055,27 +1138,44 @@ def security_context(conf, debug=None):
         generate_cert_info=conf.generate_cert_info,
         tmp_cert_file=conf.tmp_cert_file,
         tmp_key_file=conf.tmp_key_file,
-        validate_certificate=conf.validate_certificate)
+        validate_certificate=conf.validate_certificate,
+        enc_key_files=enc_key_files,
+        encryption_keypairs=conf.encryption_keypairs,
+        sec_backend=sec_backend)
 
 
 def encrypt_cert_from_item(item):
     _encrypt_cert = None
     try:
-        _elem = extension_elements_to_elements(item.extension_elements[0].children,
-                                               [pefim, ds])
-        if len(_elem) == 1:
-            _encrypt_cert = _elem[0].x509_data[0].x509_certificate.text
-        else:
-            certs = cert_from_instance(item)
-            if len(certs) > 0:
-                _encrypt_cert = certs[0]
-    except Exception:
+        try:
+            _elem = extension_elements_to_elements(
+                item.extensions.extension_elements, [pefim, ds])
+        except:
+            _elem = extension_elements_to_elements(
+                item.extension_elements[0].children,
+                [pefim, ds])
+
+        for _tmp_elem in _elem:
+            if isinstance(_tmp_elem, SPCertEnc):
+                for _tmp_key_info in _tmp_elem.key_info:
+                    if _tmp_key_info.x509_data is not None and len(
+                            _tmp_key_info.x509_data) > 0:
+                        _encrypt_cert = _tmp_key_info.x509_data[
+                            0].x509_certificate.text
+                        break
+                        # _encrypt_cert = _elem[0].x509_data[
+                        # 0].x509_certificate.text
+                    #        else:
+                    #            certs = cert_from_instance(item)
+                    #            if len(certs) > 0:
+                    #                _encrypt_cert = certs[0]
+    except Exception as _exception:
         pass
 
-    if _encrypt_cert is None:
-        certs = cert_from_instance(item)
-        if len(certs) > 0:
-            _encrypt_cert = certs[0]
+    #    if _encrypt_cert is None:
+    #        certs = cert_from_instance(item)
+    #        if len(certs) > 0:
+    #            _encrypt_cert = certs[0]
 
     if _encrypt_cert is not None:
         if _encrypt_cert.find("-----BEGIN CERTIFICATE-----\n") == -1:
@@ -1095,14 +1195,14 @@ class CertHandlerExtra(object):
     def generate_cert(self, generate_cert_info, root_cert_string,
                       root_key_string):
         raise Exception("generate_cert function must be implemented")
-        #Excepts to return (cert_string, key_string)
+        # Excepts to return (cert_string, key_string)
 
     def use_validate_cert_func(self):
         raise Exception("use_validate_cert_func function must be implemented")
 
     def validate_cert(self, cert_str, root_cert_string, root_key_string):
         raise Exception("validate_cert function must be implemented")
-        #Excepts to return True/False
+        # Excepts to return True/False
 
 
 class CertHandler(object):
@@ -1129,7 +1229,7 @@ class CertHandler(object):
 
         self._verify_cert = False
         self._generate_cert = False
-        #This cert do not have to be valid, it is just the last cert to be
+        # This cert do not have to be valid, it is just the last cert to be
         # validated.
         self._last_cert_verified = None
         self._last_validated_cert = None
@@ -1155,7 +1255,7 @@ class CertHandler(object):
             self._cert_info = None
             self._generate_cert_func_active = False
             if generate_cert_info is not None and len(self._cert_str) > 0 and \
-                    len(self._key_str) > 0 and tmp_key_file is not \
+                            len(self._key_str) > 0 and tmp_key_file is not \
                     None and tmp_cert_file is not None:
                 self._generate_cert = True
                 self._cert_info = generate_cert_info
@@ -1174,7 +1274,7 @@ class CertHandler(object):
                     cert_str, self._cert_str, self._key_str)
             else:
                 valid, mess = self._osw.verify(self._cert_str, cert_str)
-                logger.info("CertHandler.verify_cert: %s" % mess)
+                logger.info("CertHandler.verify_cert: %s", mess)
                 return valid
         return True
 
@@ -1185,7 +1285,7 @@ class CertHandler(object):
         if (self._generate_cert and active) or client_crt is not None:
             if client_crt is not None:
                 self._tmp_cert_str = client_crt
-                #No private key for signing
+                # No private key for signing
                 self._tmp_key_str = ""
             elif self._cert_handler_extra_class is not None and \
                     self._cert_handler_extra_class.use_generate_cert_func():
@@ -1193,9 +1293,9 @@ class CertHandler(object):
                     self._cert_handler_extra_class.generate_cert(
                         self._cert_info, self._cert_str, self._key_str)
             else:
-                self._tmp_cert_str, self._tmp_key_str = self._osw\
+                self._tmp_cert_str, self._tmp_key_str = self._osw \
                     .create_certificate(
-                        self._cert_info, request=True)
+                    self._cert_info, request=True)
                 self._tmp_cert_str = self._osw.create_cert_signed_certificate(
                     self._cert_str, self._key_str, self._tmp_cert_str)
                 valid, mess = self._osw.verify(self._cert_str,
@@ -1222,18 +1322,33 @@ class SecurityContext(object):
                  debug=False, template="", encrypt_key_type="des-192",
                  only_use_keys_in_metadata=False, cert_handler_extra_class=None,
                  generate_cert_info=None, tmp_cert_file=None,
-                 tmp_key_file=None, validate_certificate=None):
+                 tmp_key_file=None, validate_certificate=None,
+                 enc_key_files=None, enc_key_type="pem",
+                 encryption_keypairs=None, enc_cert_type="pem",
+                 sec_backend=None):
 
         self.crypto = crypto
         assert (isinstance(self.crypto, CryptoBackend))
 
-        # Your private key
+        if sec_backend:
+            assert (isinstance(sec_backend, RSACrypto))
+        self.sec_backend = sec_backend
+
+        # Your private key for signing
         self.key_file = key_file
         self.key_type = key_type
 
-        # Your public key
+        # Your public key for signing
         self.cert_file = cert_file
         self.cert_type = cert_type
+
+        # Your private key for encryption
+        self.enc_key_files = enc_key_files
+        self.enc_key_type = enc_key_type
+
+        # Your public key for encryption
+        self.encryption_keypairs = encryption_keypairs
+        self.enc_cert_type = enc_cert_type
 
         self.my_cert = read_cert_from_file(cert_file, cert_type)
 
@@ -1250,7 +1365,7 @@ class SecurityContext(object):
 
         if not template:
             this_dir, this_filename = os.path.split(__file__)
-            self.template = os.path.join(this_dir, "xml", "template.xml")
+            self.template = os.path.join(this_dir, "xml_template", "template.xml")
         else:
             self.template = template
 
@@ -1295,7 +1410,32 @@ class SecurityContext(object):
         :param key_type: The type of session key to use.
         :return: The encrypted text
         """
-        raise NotImplemented()
+        return self.crypto.encrypt_assertion(statement, enc_key, template,
+                                             key_type, node_xpath)
+
+    def decrypt_keys(self, enctext, keys=None):
+        """ Decrypting an encrypted text by the use of a private key.
+
+        :param enctext: The encrypted text as a string
+        :return: The decrypted text
+        """
+        _enctext = None
+        if not isinstance(keys, list):
+            keys = [keys]
+        if self.enc_key_files is not None:
+            for _enc_key_file in self.enc_key_files:
+                _enctext = self.crypto.decrypt(enctext, _enc_key_file)
+                if _enctext is not None and len(_enctext) > 0:
+                    return _enctext
+        for _key in keys:
+            if _key is not None and len(_key.strip()) > 0:
+                if not isinstance(_key, six.binary_type):
+                    _key = str(_key).encode('ascii')
+                _, key_file = make_temp(_key, decode=False)
+                _enctext = self.crypto.decrypt(enctext, key_file)
+                if _enctext is not None and len(_enctext) > 0:
+                    return _enctext
+        return enctext
 
     def decrypt(self, enctext, key_file=None):
         """ Decrypting an encrypted text by the use of a private key.
@@ -1303,9 +1443,17 @@ class SecurityContext(object):
         :param enctext: The encrypted text as a string
         :return: The decrypted text
         """
+        _enctext = None
+        if self.enc_key_files is not None:
+            for _enc_key_file in self.enc_key_files:
+                _enctext = self.crypto.decrypt(enctext, _enc_key_file)
+                if _enctext is not None and len(_enctext) > 0:
+                    return _enctext
         if key_file is not None and len(key_file.strip()) > 0:
-            return self.crypto.decrypt(enctext, key_file)
-        return self.crypto.decrypt(enctext, self.key_file)
+            _enctext = self.crypto.decrypt(enctext, key_file)
+            if _enctext is not None and len(_enctext) > 0:
+                return _enctext
+        return enctext
 
     def verify_signature(self, signedtext, cert_file=None, cert_type="pem",
                          node_name=NODE_NAME, node_id=None, id_attr=""):
@@ -1335,22 +1483,27 @@ class SecurityContext(object):
 
     def _check_signature(self, decoded_xml, item, node_name=NODE_NAME,
                          origdoc=None, id_attr="", must=False,
-                         only_valid_cert=False):
-        #print item
+                         only_valid_cert=False, issuer=None):
+        # print(item)
         try:
-            issuer = item.issuer.text.strip()
+            _issuer = item.issuer.text.strip()
         except AttributeError:
-            issuer = None
+            _issuer = None
 
+        if _issuer is None:
+            try:
+                _issuer = issuer.text.strip()
+            except AttributeError:
+                _issuer = None
         # More trust in certs from metadata then certs in the XML document
         if self.metadata:
             try:
-                _certs = self.metadata.certs(issuer, "any", "signing")
+                _certs = self.metadata.certs(_issuer, "any", "signing")
             except KeyError:
                 _certs = []
             certs = []
             for cert in _certs:
-                if isinstance(cert, basestring):
+                if isinstance(cert, six.string_types):
                     certs.append(make_temp(pem_format(cert), suffix=".pem",
                                            decode=False,
                                            delete=self._xmlsec_delete_tmpfiles))
@@ -1362,51 +1515,36 @@ class SecurityContext(object):
         if not certs and not self.only_use_keys_in_metadata:
             logger.debug("==== Certs from instance ====")
             certs = [make_temp(pem_format(cert), suffix=".pem",
-                               decode=False, delete=self._xmlsec_delete_tmpfiles)
-                    for cert in cert_from_instance(item)]
+                               decode=False,
+                               delete=self._xmlsec_delete_tmpfiles)
+                     for cert in cert_from_instance(item)]
         else:
-            logger.debug("==== Certs from metadata ==== %s: %s ====" % (issuer,
-                                                                        certs))
+            logger.debug("==== Certs from metadata ==== %s: %s ====", issuer,
+                         certs)
 
         if not certs:
             raise MissingKey("%s" % issuer)
 
-        #print certs
+        # print(certs)
 
         verified = False
         last_pem_file = None
         for _, pem_file in certs:
             try:
                 last_pem_file = pem_file
-                if origdoc is not None:
-                    try:
-                        if self.verify_signature(origdoc, pem_file,
-                                                 node_name=node_name,
-                                                 node_id=item.id,
-                                                 id_attr=id_attr):
-                            verified = True
-                            break
-                    except Exception:
-                        if self.verify_signature(decoded_xml, pem_file,
-                                                 node_name=node_name,
-                                                 node_id=item.id,
-                                                 id_attr=id_attr):
-                            verified = True
-                            break
-                else:
-                    if self.verify_signature(decoded_xml, pem_file,
-                                             node_name=node_name,
-                                             node_id=item.id, id_attr=id_attr):
-                        verified = True
-                        break
-            except XmlsecError, exc:
-                logger.error("check_sig: %s" % exc)
+                if self.verify_signature(decoded_xml, pem_file,
+                                         node_name=node_name,
+                                         node_id=item.id, id_attr=id_attr):
+                    verified = True
+                    break
+            except XmlsecError as exc:
+                logger.error("check_sig: %s", exc)
                 pass
-            except SignatureError, exc:
-                logger.error("check_sig: %s" % exc)
+            except SignatureError as exc:
+                logger.error("check_sig: %s", exc)
                 pass
-            except Exception, exc:
-                logger.error("check_sig: %s" % exc)
+            except Exception as exc:
+                logger.error("check_sig: %s", exc)
                 raise
 
         if (not verified) and (not only_valid_cert):
@@ -1418,7 +1556,7 @@ class SecurityContext(object):
         return item
 
     def check_signature(self, item, node_name=NODE_NAME, origdoc=None,
-                        id_attr="", must=False):
+                        id_attr="", must=False, issuer=None):
         """
 
         :param item: Parsed entity
@@ -1429,7 +1567,7 @@ class SecurityContext(object):
         :return:
         """
         return self._check_signature(origdoc, item, node_name, origdoc,
-                                     id_attr=id_attr, must=must)
+                                     id_attr=id_attr, must=must, issuer=issuer)
 
     def correctly_signed_message(self, decoded_xml, msgtype, must=False,
                                  origdoc=None, only_valid_cert=False):
@@ -1455,7 +1593,8 @@ class SecurityContext(object):
 
         if not msg.signature:
             if must:
-                raise SignatureError("Required signature missing on %s" % msgtype)
+                raise SignatureError(
+                    "Required signature missing on %s" % msgtype)
             else:
                 return msg
 
@@ -1590,34 +1729,19 @@ class SecurityContext(object):
             raise TypeError("Not a Response")
 
         if response.signature:
-            self._check_signature(decoded_xml, response, class_name(response),
-                                  origdoc)
+            if "do_not_verify" in kwargs:
+                pass
+            else:
+                self._check_signature(decoded_xml, response,
+                                      class_name(response), origdoc)
         elif require_response_signature:
             raise SignatureError("Signature missing for response")
 
-        # if isinstance(response, Response) and response.assertion:
-        #     # Try to find the signing cert in the assertion
-        #     for assertion in response.assertion:
-        #         if not hasattr(assertion, 'signature') or not assertion.signature:
-        #             logger.debug("unsigned")
-        #             if must:
-        #                 raise SignatureError("Signature missing for assertion")
-        #             continue
-        #         else:
-        #             logger.debug("signed")
-        #
-        #         try:
-        #             self._check_signature(decoded_xml, assertion,
-        #                                   class_name(assertion), origdoc)
-        #         except Exception, exc:
-        #             logger.error("correctly_signed_response: %s" % exc)
-        #             raise
-
         return response
 
-    #--------------------------------------------------------------------------
+    # --------------------------------------------------------------------------
     # SIGNATURE PART
-    #--------------------------------------------------------------------------
+    # --------------------------------------------------------------------------
     def sign_statement_using_xmlsec(self, statement, **kwargs):
         """ Deprecated function. See sign_statement(). """
         return self.sign_statement(statement, **kwargs)
@@ -1639,7 +1763,7 @@ class SecurityContext(object):
             id_attr = ID_ATTR
 
         if not key_file and key:
-            _, key_file = make_temp("%s" % key, ".pem")
+            _, key_file = make_temp(str(key).encode('utf-8'), ".pem")
 
         if not key and not key_file:
             key_file = self.key_file
@@ -1678,7 +1802,8 @@ class SecurityContext(object):
         return self.sign_statement(statement, class_name(
             samlp.AttributeQuery()), **kwargs)
 
-    def multiple_signatures(self, statement, to_sign, key=None, key_file=None):
+    def multiple_signatures(self, statement, to_sign, key=None, key_file=None,
+                            sign_alg=None, digest_alg=None):
         """
         Sign multiple parts of a statement
 
@@ -1697,7 +1822,9 @@ class SecurityContext(object):
                     sid = item.id
 
             if not item.signature:
-                item.signature = pre_signature_part(sid, self.cert_file)
+                item.signature = pre_signature_part(sid, self.cert_file,
+                                                    sign_alg=sign_alg,
+                                                    digest_alg=digest_alg)
 
             statement = self.sign_statement(statement, class_name(item),
                                             key=key, key_file=key_file,
@@ -1723,9 +1850,9 @@ def pre_signature_part(ident, public_key=None, identifier=None,
     """
 
     if not digest_alg:
-        digest_alg=ds.digest_default
+        digest_alg = ds.DefaultSignature().get_digest_alg()
     if not sign_alg:
-        sign_alg=ds.sig_default
+        sign_alg = ds.DefaultSignature().get_sign_alg()
     signature_method = ds.SignatureMethod(algorithm=sign_alg)
     canonicalization_method = ds.CanonicalizationMethod(
         algorithm=ds.ALG_EXC_C14N)
@@ -1820,10 +1947,11 @@ def pre_encrypt_assertion(response):
     assertion = response.assertion
     response.assertion = None
     response.encrypted_assertion = EncryptedAssertion()
-    if isinstance(assertion, list):
-        response.encrypted_assertion.add_extension_elements(assertion)
-    else:
-        response.encrypted_assertion.add_extension_element(assertion)
+    if assertion is not None:
+        if isinstance(assertion, list):
+            response.encrypted_assertion.add_extension_elements(assertion)
+        else:
+            response.encrypted_assertion.add_extension_element(assertion)
     # txt = "%s" % response
     # _ass = "%s" % assertion
     # _ass = rm_xmltag(_ass)
@@ -1834,12 +1962,14 @@ def pre_encrypt_assertion(response):
     return response
 
 
-def response_factory(sign=False, encrypt=False, **kwargs):
+def response_factory(sign=False, encrypt=False, sign_alg=None, digest_alg=None,
+                     **kwargs):
     response = samlp.Response(id=sid(), version=VERSION,
                               issue_instant=instant())
 
     if sign:
-        response.signature = pre_signature_part(kwargs["id"])
+        response.signature = pre_signature_part(kwargs["id"], sign_alg=sign_alg,
+                                                digest_alg=digest_alg)
     if encrypt:
         pass
 
@@ -1847,6 +1977,7 @@ def response_factory(sign=False, encrypt=False, **kwargs):
         setattr(response, key, val)
 
     return response
+
 
 # ----------------------------------------------------------------------------
 if __name__ == '__main__':
@@ -1859,4 +1990,4 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.listsigalgs:
-        print '\n'.join([key for key, value in SIGNER_ALGS.items()])
+        print('\n'.join([key for key, value in SIGNER_ALGS.items()]))

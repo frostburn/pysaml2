@@ -1,6 +1,7 @@
 # !/usr/bin/env python
 # -*- coding: utf-8 -*-
 #
+import six
 
 """Contains classes and functions that a SAML2.0 Service Provider (SP) may use
 to conclude its tasks.
@@ -13,6 +14,8 @@ from saml2 import BINDING_HTTP_REDIRECT
 from saml2 import BINDING_HTTP_POST
 from saml2 import BINDING_SOAP
 
+import saml2.xmldsig as ds
+
 from saml2.ident import decode, code
 from saml2.httpbase import HTTPError
 from saml2.s_utils import sid
@@ -23,15 +26,10 @@ from saml2.samlp import STATUS_UNKNOWN_PRINCIPAL
 from saml2.time_util import not_on_or_after
 from saml2.saml import AssertionIDRef
 from saml2.client_base import Base
+from saml2.client_base import SignOnError
 from saml2.client_base import LogoutError
 from saml2.client_base import NoServiceDefined
 from saml2.mdstore import destinations
-
-try:
-    from urlparse import parse_qs
-except ImportError:
-    # Compatibility with Python <= 2.5
-    from cgi import parse_qs
 
 import logging
 
@@ -41,13 +39,11 @@ logger = logging.getLogger(__name__)
 class Saml2Client(Base):
     """ The basic pySAML2 service provider class """
 
-    def prepare_for_authenticate(self, entityid=None, relay_state="",
-                                 binding=saml2.BINDING_HTTP_REDIRECT, vorg="",
-                                 nameid_format=None,
-                                 scoping=None, consent=None, extensions=None,
-                                 sign=None,
-                                 response_binding=saml2.BINDING_HTTP_POST,
-                                 **kwargs):
+    def prepare_for_authenticate(
+            self, entityid=None, relay_state="",
+            binding=saml2.BINDING_HTTP_REDIRECT, vorg="", nameid_format=None,
+            scoping=None, consent=None, extensions=None, sign=None,
+            response_binding=saml2.BINDING_HTTP_POST, **kwargs):
         """ Makes all necessary preparations for an authentication request.
 
         :param entityid: The entity ID of the IdP to send the request to
@@ -55,6 +51,7 @@ class Saml2Client(Base):
             successfull log in.
         :param binding: Which binding to use for sending the request
         :param vorg: The entity_id of the virtual organization I'm a member of
+        :param nameid_format:
         :param scoping: For which IdPs this query are aimed.
         :param consent: Whether the principal have given her consent
         :param extensions: Possible extensions
@@ -64,22 +61,80 @@ class Saml2Client(Base):
         :return: session id and AuthnRequest info
         """
 
-        destination = self._sso_location(entityid, binding)
+        reqid, negotiated_binding, info = \
+            self.prepare_for_negotiated_authenticate(
+                entityid=entityid,
+                relay_state=relay_state,
+                binding=binding,
+                vorg=vorg,
+                nameid_format=nameid_format,
+                scoping=scoping,
+                consent=consent,
+                extensions=extensions,
+                sign=sign,
+                response_binding=response_binding,
+                **kwargs)
 
-        reqid, req = self.create_authn_request(destination, vorg, scoping,
-                                               response_binding, nameid_format,
-                                               consent=consent,
-                                               extensions=extensions, sign=sign,
-                                               **kwargs)
-        _req_str = "%s" % req
-
-        logger.info("AuthNReq: %s" % _req_str)
-
-        info = self.apply_binding(binding, _req_str, destination, relay_state)
+        assert negotiated_binding == binding
 
         return reqid, info
 
-    def global_logout(self, name_id, reason="", expire=None, sign=None):
+    def prepare_for_negotiated_authenticate(
+            self, entityid=None, relay_state="", binding=None, vorg="",
+            nameid_format=None, scoping=None, consent=None, extensions=None,
+            sign=None, response_binding=saml2.BINDING_HTTP_POST, **kwargs):
+        """ Makes all necessary preparations for an authentication request
+        that negotiates
+        which binding to use for authentication.
+
+        :param entityid: The entity ID of the IdP to send the request to
+        :param relay_state: To where the user should be returned after
+            successfull log in.
+        :param binding: Which binding to use for sending the request
+        :param vorg: The entity_id of the virtual organization I'm a member of
+        :param nameid_format:
+        :param scoping: For which IdPs this query are aimed.
+        :param consent: Whether the principal have given her consent
+        :param extensions: Possible extensions
+        :param sign: Whether the request should be signed or not.
+        :param response_binding: Which binding to use for receiving the response
+        :param kwargs: Extra key word arguments
+        :return: session id and AuthnRequest info
+        """
+
+        expected_binding = binding
+
+        for binding in [BINDING_HTTP_REDIRECT, BINDING_HTTP_POST]:
+            if expected_binding and binding != expected_binding:
+                continue
+
+            destination = self._sso_location(entityid, binding)
+            logger.info("destination to provider: %s", destination)
+
+            reqid, request = self.create_authn_request(
+                destination, vorg, scoping, response_binding, nameid_format,
+                consent=consent, extensions=extensions, sign=sign,
+                **kwargs)
+
+            _req_str = str(request)
+
+            logger.info("AuthNReq: %s", _req_str)
+
+            try:
+                args = {'sigalg': kwargs["sigalg"]}
+            except KeyError:
+                args = {}
+
+            http_info = self.apply_binding(binding, _req_str, destination,
+                                           relay_state, **args)
+
+            return reqid, binding, http_info
+        else:
+            raise SignOnError(
+                "No supported bindings available for authentication")
+
+    def global_logout(self, name_id, reason="", expire=None, sign=None,
+                      sign_alg=None, digest_alg=None):
         """ More or less a layer of indirection :-/
         Bootstrapping the whole thing by finding all the IdPs that should
         be notified.
@@ -97,17 +152,19 @@ class Saml2Client(Base):
             conversation.
         """
 
-        if isinstance(name_id, basestring):
+        if isinstance(name_id, six.string_types):
             name_id = decode(name_id)
 
-        logger.info("logout request for: %s" % name_id)
+        logger.info("logout request for: %s", name_id)
 
         # find out which IdPs/AAs I should notify
         entity_ids = self.users.issuers_of_info(name_id)
-        return self.do_logout(name_id, entity_ids, reason, expire, sign)
+        return self.do_logout(name_id, entity_ids, reason, expire, sign,
+                              sign_alg=sign_alg, digest_alg=digest_alg)
 
     def do_logout(self, name_id, entity_ids, reason, expire, sign=None,
-                  expected_binding=None):
+                  expected_binding=None, sign_alg=None, digest_alg=None,
+                  **kwargs):
         """
 
         :param name_id: Identifier of the Subject (a NameID instance)
@@ -118,6 +175,7 @@ class Saml2Client(Base):
         :param sign: Whether to sign the request or not
         :param expected_binding: Specify the expected binding then not try it
             all
+        :param kwargs: Extra key word arguments.
         :return:
         """
         # check time
@@ -130,7 +188,7 @@ class Saml2Client(Base):
         responses = {}
 
         for entity_id in entity_ids:
-            logger.debug("Logout from '%s'" % entity_id)
+            logger.debug("Logout from '%s'", entity_id)
             # for all where I can use the SOAP binding, do those first
             for binding in [BINDING_SOAP, BINDING_HTTP_POST,
                             BINDING_HTTP_REDIRECT]:
@@ -144,31 +202,46 @@ class Saml2Client(Base):
                     srvs = None
 
                 if not srvs:
-                    logger.debug("No SLO '%s' service" % binding)
+                    logger.debug("No SLO '%s' service", binding)
                     continue
 
                 destination = destinations(srvs)[0]
-                logger.info("destination to provider: %s" % destination)
+                logger.info("destination to provider: %s", destination)
+                try:
+                    session_info = self.users.get_info_from(name_id,
+                                                            entity_id,
+                                                            False)
+                    session_indexes = [session_info['session_index']]
+                except KeyError:
+                    session_indexes = None
                 req_id, request = self.create_logout_request(
                     destination, entity_id, name_id=name_id, reason=reason,
-                    expire=expire)
+                    expire=expire, session_indexes=session_indexes)
 
-                #to_sign = []
+                # to_sign = []
                 if binding.startswith("http://"):
                     sign = True
 
                 if sign is None:
                     sign = self.logout_requests_signed
 
+                sigalg = None
                 if sign:
-                    srequest = self.sign(request)
+                    if binding == BINDING_HTTP_REDIRECT:
+                        sigalg = kwargs.get(
+                            "sigalg", ds.DefaultSignature().get_sign_alg())
+                        # key = kwargs.get("key", self.signkey)
+                        srequest = str(request)
+                    else:
+                        srequest = self.sign(request, sign_alg=sign_alg,
+                                             digest_alg=digest_alg)
                 else:
-                    srequest = "%s" % request
+                    srequest = str(request)
 
                 relay_state = self._relay_state(req_id)
 
                 http_info = self.apply_binding(binding, srequest, destination,
-                                               relay_state)
+                                               relay_state, sigalg=sigalg)
 
                 if binding == BINDING_SOAP:
                     response = self.send(**http_info)
@@ -176,11 +249,12 @@ class Saml2Client(Base):
                     if response and response.status_code == 200:
                         not_done.remove(entity_id)
                         response = response.text
-                        logger.info("Response: %s" % response)
-                        res = self.parse_logout_request_response(response, binding)
+                        logger.info("Response: %s", response)
+                        res = self.parse_logout_request_response(response,
+                                                                 binding)
                         responses[entity_id] = res
                     else:
-                        logger.info("NOT OK response from %s" % destination)
+                        logger.info("NOT OK response from %s", destination)
 
                 else:
                     self.state[req_id] = {"entity_id": entity_id,
@@ -219,7 +293,7 @@ class Saml2Client(Base):
         identity = self.users.get_identity(name_id)[0]
         return bool(identity)
 
-    def handle_logout_response(self, response):
+    def handle_logout_response(self, response, sign_alg=None, digest_alg=None):
         """ handles a Logout response
 
         :param response: A response.Response instance
@@ -227,21 +301,24 @@ class Saml2Client(Base):
             response message, response headers and message)
         """
 
-        logger.info("state: %s" % (self.state,))
+        logger.info("state: %s", self.state)
         status = self.state[response.in_response_to]
-        logger.info("status: %s" % (status,))
+        logger.info("status: %s", status)
         issuer = response.issuer()
-        logger.info("issuer: %s" % issuer)
+        logger.info("issuer: %s", issuer)
         del self.state[response.in_response_to]
         if status["entity_ids"] == [issuer]:  # done
             self.local_logout(decode(status["name_id"]))
             return 0, "200 Ok", [("Content-type", "text/html")], []
         else:
             status["entity_ids"].remove(issuer)
+            if "sign_alg" in status:
+                sign_alg = status["sign_alg"]
             return self.do_logout(decode(status["name_id"]),
                                   status["entity_ids"],
                                   status["reason"], status["not_on_or_after"],
-                                  status["sign"])
+                                  status["sign"], sign_alg=sign_alg,
+                                  digest_alg=digest_alg)
 
     def _use_soap(self, destination, query_type, **kwargs):
         _create_func = getattr(self, "create_%s" % query_type)
@@ -271,15 +348,15 @@ class Saml2Client(Base):
             raise HTTPError("%d:%s" % (response.status_code, response.error))
 
         if response:
-            #not_done.remove(entity_id)
-            logger.info("OK response from %s" % destination)
+            # not_done.remove(entity_id)
+            logger.info("OK response from %s", destination)
             return response
         else:
-            logger.info("NOT OK response from %s" % destination)
+            logger.info("NOT OK response from %s", destination)
 
         return None
 
-    #noinspection PyUnusedLocal
+    # noinspection PyUnusedLocal
     def do_authz_decision_query(self, entity_id, action,
                                 subject_id, nameid_format,
                                 evidence=None, resource=None,
@@ -311,7 +388,7 @@ class Saml2Client(Base):
             raise NoServiceDefined("%s: %s" % (entity_id,
                                                "assertion_id_request_service"))
 
-        if isinstance(assertion_ids, basestring):
+        if isinstance(assertion_ids, six.string_types):
             assertion_ids = [assertion_ids]
 
         _id_refs = [AssertionIDRef(_id) for _id in assertion_ids]
@@ -426,7 +503,7 @@ class Saml2Client(Base):
                     'method': "POST
                 }
         """
-        logger.info("logout request: %s" % request)
+        logger.info("logout request: %s", request)
 
         _req = self._parse_request(request, LogoutRequest,
                                    "single_logout_service", binding)

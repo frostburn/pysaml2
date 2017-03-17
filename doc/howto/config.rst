@@ -270,6 +270,19 @@ idp/aa
 
 Directives that are specific to an IdP or AA service instance
 
+sign_assertion
+""""""""""""""
+
+Specifies if the IdP should sign the assertion in an authentication response
+or not. Can be True or False. Default is False.
+
+sign_response
+"""""""""""""
+
+Specifies if the IdP should sign the authentication response or not. Can be
+True or False. Default is False.
+
+
 policy
 """"""
 
@@ -351,13 +364,13 @@ by default. This can be overriden by application code for a specific call.
 This sets the AuthnRequestsSigned attribute of the SPSSODescriptor node
 of the metadata so the IdP will know this SP preference.
 
-Valid values are "true" or "false". Default value is "false".
+Valid values are True or False. Default value is True.
 
 Example::
 
     "service": {
         "sp": {
-            "authn_requests_signed": "true",
+            "authn_requests_signed": True,
         }
     }
 
@@ -419,13 +432,13 @@ Indicates if this SP wants the IdP to send the assertions signed. This
 sets the WantAssertionsSigned attribute of the SPSSODescriptor node
 of the metadata so the IdP will know this SP preference.
 
-Valid values are "true" or "false". Default value is "true".
+Valid values are True or False. Default value is False.
 
 Example::
 
     "service": {
         "sp": {
-            "want_assertions_signed": "true",
+            "want_assertions_signed": True,
         }
     }
 
@@ -452,8 +465,23 @@ This directive has as value a dictionary with one or more of the following keys:
 * single_logout_service (aa, idp, sp)
 * single_sign_on_service (idp)
 
-The values per service is a list of tuples containing endpoint and binding
-type.
+The values per service is a list of endpoint specifications.
+An endpoint specification can either be just the URL::
+
+  ”http://localhost:8088/A"
+
+or it can be a 2-tuple (URL+binding)::
+
+  from saml2 import BINDING_HTTP_POST
+  (”http://localhost:8087/A”, BINDING_HTTP_POST)
+
+or a 3-tuple (URL+binding+index)::
+
+  from saml2 import BINDING_HTTP_POST
+  (”http://lingon.catalogix.se:8087/A”, BINDING_HTTP_POST, 1)
+
+If no binding is specified, no index can be set.
+If no index is specified, the index is set based on the position in the list.
 
 Example::
 
@@ -475,13 +503,13 @@ Indicates if this entity will sign the Logout Requests originated from it.
 
 This can be overriden by application code for a specific call.
 
-Valid values are "true" or "false". Default value is "false".
+Valid values are True or False. Default value is False.
 
 Example::
 
     "service": {
         "sp": {
-            "logout_requests_signed": "true",
+            "logout_requests_signed": False,
         }
     }
 

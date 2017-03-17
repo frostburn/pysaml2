@@ -1,32 +1,23 @@
 #!/usr/bin/env python
+
+import base64
+import hashlib
+import hmac
 import logging
 import random
-
-import time
-import base64
-import sys
-import hmac
 import string
-
-# from python 2.5
-import imp
+import sys
+import time
 import traceback
+import zlib
 
-if sys.version_info >= (2, 5):
-    import hashlib
-else:  # before python 2.5
-    import sha
+import six
 
 from saml2 import saml
 from saml2 import samlp
 from saml2 import VERSION
 from saml2.time_util import instant
 
-try:
-    from hashlib import md5
-except ImportError:
-    from md5 import md5
-import zlib
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +142,8 @@ def deflate_and_base64_encode(string_val):
     :param string_val: The string to deflate and encode
     :return: The deflated and encoded string
     """
+    if not isinstance(string_val, six.binary_type):
+        string_val = string_val.encode('utf-8')
     return base64.b64encode(zlib.compress(string_val)[2:-4])
 
 
@@ -163,8 +156,18 @@ def rndstr(size=16, alphabet=""):
     """
     rng = random.SystemRandom()
     if not alphabet:
-        alphabet = string.letters[0:52] + string.digits
-    return str().join(rng.choice(alphabet) for _ in range(size))
+        alphabet = string.ascii_letters[0:52] + string.digits
+    return type(alphabet)().join(rng.choice(alphabet) for _ in range(size))
+
+
+def rndbytes(size=16, alphabet=""):
+    """
+    Returns rndstr always as a binary type
+    """
+    x = rndstr(size, alphabet)
+    if isinstance(x, six.string_types):
+        return x.encode('utf-8')
+    return x
 
 
 def sid():
@@ -224,20 +227,20 @@ def error_status_factory(info):
             msg = info.args[0]
         except IndexError:
             msg = "%s" % info
-        status = samlp.Status(
-            status_message=samlp.StatusMessage(text=msg),
-            status_code=samlp.StatusCode(
-                value=samlp.STATUS_RESPONDER,
-                status_code=samlp.StatusCode(
-                    value=exc_val)))
     else:
-        (errcode, text) = info
-        status = samlp.Status(
-            status_message=samlp.StatusMessage(text=text),
-            status_code=samlp.StatusCode(
-                value=samlp.STATUS_RESPONDER,
-                status_code=samlp.StatusCode(value=errcode)))
+        (exc_val, msg) = info
 
+    if msg:
+        status_msg = samlp.StatusMessage(text=msg)
+    else:
+        status_msg = None
+
+    status = samlp.Status(
+        status_message=status_msg,
+        status_code=samlp.StatusCode(
+            value=samlp.STATUS_RESPONDER,
+            status_code=samlp.StatusCode(
+                value=exc_val)))
     return status
 
 
@@ -282,7 +285,7 @@ def _attrval(val, typ=""):
 
 
 def do_ava(val, typ=""):
-    if isinstance(val, basestring):
+    if isinstance(val, six.string_types):
         ava = saml.AttributeValue()
         ava.set_text(val)
         attrval = [ava]
@@ -310,7 +313,7 @@ def do_attribute(val, typ, key):
     if attrval:
         attr.attribute_value = attrval
 
-    if isinstance(key, basestring):
+    if isinstance(key, six.string_types):
         attr.name = key
     elif isinstance(key, tuple):  # 3-tuple or 2-tuple
         try:
@@ -357,13 +360,24 @@ def do_attribute_statement(identity):
 def factory(klass, **kwargs):
     instance = klass()
     for key, val in kwargs.items():
+        if isinstance(val, dict):
+            cls = instance.child_class(key)
+            val = factory(cls, **val)
         setattr(instance, key, val)
     return instance
 
 
 def signature(secret, parts):
-    """Generates a signature.
+    """Generates a signature. All strings are assumed to be utf-8
     """
+    if not isinstance(secret, six.binary_type):
+        secret = secret.encode('utf-8')
+    newparts = []
+    for part in parts:
+        if not isinstance(part, six.binary_type):
+            part = part.encode('utf-8')
+        newparts.append(part)
+    parts = newparts
     if sys.version_info >= (2, 5):
         csum = hmac.new(secret, digestmod=hashlib.sha1)
     else:
@@ -381,67 +395,6 @@ def verify_signature(secret, parts):
         return True
     else:
         return False
-
-
-FTICKS_FORMAT = "F-TICKS/SWAMID/2.0%s#"
-
-
-def fticks_log(sp, logf, idp_entity_id, user_id, secret, assertion):
-    """
-    'F-TICKS/' federationIdentifier '/' version *('#' attribute '=' value) '#'
-    Allowed attributes:
-        TS	the login time stamp
-        RP	the relying party entityID
-        AP	the asserting party entityID (typcially the IdP)
-        PN	a sha256-hash of the local principal name and a unique key
-        AM	the authentication method URN
-
-    :param sp: Client instance
-    :param logf: The log function to use
-    :param idp_entity_id: IdP entity ID
-    :param user_id: The user identifier
-    :param secret: A salt to make the hash more secure
-    :param assertion: A SAML Assertion instance gotten from the IdP
-    """
-    csum = hmac.new(secret, digestmod=hashlib.sha1)
-    csum.update(user_id)
-    ac = assertion.AuthnStatement[0].AuthnContext[0]
-
-    info = {
-        "TS": time.time(),
-        "RP": sp.entity_id,
-        "AP": idp_entity_id,
-        "PN": csum.hexdigest(),
-        "AM": ac.AuthnContextClassRef.text
-    }
-    logf.info(FTICKS_FORMAT % "#".join(["%s=%s" % (a, v) for a, v in info]))
-
-
-def dynamic_importer(name, class_name=None):
-    """
-    Dynamically imports modules / classes
-    """
-    try:
-        fp, pathname, description = imp.find_module(name)
-    except ImportError:
-        print "unable to locate module: " + name
-        return None, None
-
-    try:
-        package = imp.load_module(name, fp, pathname, description)
-    except Exception:
-        raise
-
-    if class_name:
-        try:
-            _class = imp.load_module("%s.%s" % (name, class_name), fp,
-                                     pathname, description)
-        except Exception:
-            raise
-
-        return package, _class
-    else:
-        return package, None
 
 
 def exception_trace(exc):

@@ -2,6 +2,8 @@
 *.~
 \#*
 .*~
+.eggs
+*.egg
 *.egg-info
 example/*/*.log
 example/*.db
@@ -27,6 +29,12 @@ tmp*
 *egg-info*
 .coverage
 *.tmpl
+*.iml
+_build/
+.cache
+*.swp
+.tox
+env
 
 example/idp3/htdocs/login.mako
 
@@ -186,8 +194,7 @@ example/sp-repoze/old_sp.xml
 
 example/sp-repoze/sp_conf_2.Pygmalion
 
-.gitignore.swp
-
 example/sp-repoze/sp_conf_2.py
 
 sp.xml
+tests/pki/qwerty.*

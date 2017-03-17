@@ -1,15 +1,17 @@
 import calendar
-import cookielib
+import six
+from six.moves import http_cookiejar
 import copy
 import re
-import urllib
-import urlparse
+from six.moves.urllib.parse import urlparse
+from six.moves.urllib.parse import urlencode
 import requests
 import time
-from Cookie import SimpleCookie
+from six.moves.http_cookies import SimpleCookie
 from saml2.time_util import utc_now
 from saml2 import class_name, SAMLError
 from saml2.pack import http_form_post_message
+from saml2.pack import http_post_message
 from saml2.pack import make_soap_enveloped_saml_thingy
 from saml2.pack import http_redirect_message
 
@@ -57,6 +59,10 @@ class HTTPError(SAMLError):
     pass
 
 
+TIME_FORMAT = ["%d-%b-%Y %H:%M:%S %Z", "%d-%b-%y %H:%M:%S %Z",
+               "%d %b %Y %H:%M:%S %Z"]
+
+
 def _since_epoch(cdate):
     """
     :param cdate: date format 'Wed, 06-Jun-2012 01:34:34 GMT'
@@ -68,20 +74,20 @@ def _since_epoch(cdate):
             return utc_now()
 
     cdate = cdate[5:] # assume short weekday, i.e. do not support obsolete RFC 1036 date format
-    try:
-        t = time.strptime(cdate, "%d-%b-%Y %H:%M:%S %Z")   # e.g. 18-Apr-2014 12:30:51 GMT
-    except ValueError:
+    t = -1
+    for time_format in TIME_FORMAT :
         try:
-            t = time.strptime(cdate, "%d-%b-%y %H:%M:%S %Z")   # e.g. 18-Apr-14 12:30:51 GMT
+            t = time.strptime(cdate, time_format)   # e.g. 18-Apr-2014 12:30:51 GMT
         except ValueError:
-            try:
-                t = time.strptime(cdate, "%d %b %Y %H:%M:%S %Z")   # e.g. 18 Apr 2014 12:30:51 GMT
-            except ValueError:
-                raise Exception, 'ValueError: Date "{0}" does not match any of '.format(cdate) + \
-                                 '"%d-%b-%Y %H:%M:%S %Z", ' + \
-                                 '"%d-%b-%y %H:%M:%S %Z", ' + \
-                                 '"%d %b %Y %H:%M:%S %Z".'
-    #return int(time.mktime(t))
+            pass
+        else:
+            break
+
+    if t == -1:
+        raise (Exception,
+               'ValueError: Date "{0}" does not match any of: {1}'.format(
+                   cdate,TIME_FORMAT))
+
     return calendar.timegm(t)
 
 
@@ -98,7 +104,7 @@ class HTTPBase(object):
                  cert_file=None):
         self.request_args = {"allow_redirects": False}
         #self.cookies = {}
-        self.cookiejar = cookielib.CookieJar()
+        self.cookiejar = http_cookiejar.CookieJar()
 
         self.request_args["verify"] = verify
         if verify:
@@ -118,7 +124,7 @@ class HTTPBase(object):
         :param url:
         :return:
         """
-        part = urlparse.urlparse(url)
+        part = urlparse(url)
 
         #if part.port:
         #    _domain = "%s:%s" % (part.hostname, part.port)
@@ -130,7 +136,7 @@ class HTTPBase(object):
         for _, a in list(self.cookiejar._cookies.items()):
             for _, b in a.items():
                 for cookie in list(b.values()):
-                    # print cookie
+                    # print(cookie)
                     if cookie.expires and cookie.expires <= now:
                         continue
                     if not re.search("%s$" % cookie.domain, _domain):
@@ -143,14 +149,14 @@ class HTTPBase(object):
         return cookie_dict
 
     def set_cookie(self, kaka, request):
-        """Returns a cookielib.Cookie based on a set-cookie header line"""
+        """Returns a http_cookiejar.Cookie based on a set-cookie header line"""
 
         if not kaka:
             return
 
-        part = urlparse.urlparse(request.url)
+        part = urlparse(request.url)
         _domain = part.hostname
-        logger.debug("%s: '%s'" % (_domain, kaka))
+        logger.debug("%s: '%s'", _domain, kaka)
 
         for cookie_name, morsel in kaka.items():
             std_attr = ATTRS.copy()
@@ -197,7 +203,7 @@ class HTTPBase(object):
                                          name=std_attr["name"])
                 except ValueError:
                     pass
-            elif morsel["expires"] < utc_now():
+            elif std_attr["expires"] and std_attr["expires"] < utc_now():
                 try:
                     self.cookiejar.clear(domain=std_attr["domain"],
                                          path=std_attr["path"],
@@ -205,7 +211,7 @@ class HTTPBase(object):
                 except ValueError:
                     pass
             else:
-                new_cookie = cookielib.Cookie(**std_attr)
+                new_cookie = http_cookiejar.Cookie(**std_attr)
                 self.cookiejar.set_cookie(new_cookie)
 
     def send(self, url, method="GET", **kwargs):
@@ -227,15 +233,15 @@ class HTTPBase(object):
                 _kwargs["headers"] = dict(_kwargs["headers"])
 
         try:
-            logger.debug("%s to %s" % (method, url))
+            logger.debug("%s to %s", method, url)
             for arg in ["cookies", "data", "auth"]:
                 try:
-                    logger.debug("%s: %s" % (arg.upper(), _kwargs[arg]))
+                    logger.debug("%s: %s", arg.upper(), _kwargs[arg])
                 except KeyError:
                     pass
             r = requests.request(method, url, **_kwargs)
-            logger.debug("Response status: %s" % r.status_code)
-        except requests.ConnectionError, exc:
+            logger.debug("Response status: %s", r.status_code)
+        except requests.ConnectionError as exc:
             raise ConnectionError("%s" % exc)
 
         try:
@@ -246,6 +252,23 @@ class HTTPBase(object):
             pass
 
         return r
+
+    @staticmethod
+    def use_http_post(message, destination, relay_state,
+                           typ="SAMLRequest"):
+        """
+        Return a urlencoded message that should be POSTed to the recipient.
+
+        :param message: The response
+        :param destination: Where the response should be sent
+        :param relay_state: The relay_state received in the request
+        :param typ: Whether a Request, Response or Artifact
+        :return: dictionary
+        """
+        if not isinstance(message, six.string_types):
+            message = "%s" % (message,)
+
+        return http_post_message(message, relay_state, typ)
 
     @staticmethod
     def use_http_form_post(message, destination, relay_state,
@@ -260,7 +283,7 @@ class HTTPBase(object):
         :param typ: Whether a Request, Response or Artifact
         :return: dictionary
         """
-        if not isinstance(message, basestring):
+        if not isinstance(message, six.string_types):
             message = "%s" % (message,)
 
         return http_form_post_message(message, destination, relay_state, typ)
@@ -268,10 +291,10 @@ class HTTPBase(object):
     @staticmethod
     def use_http_artifact(message, destination="", relay_state=""):
         if relay_state:
-            query = urllib.urlencode({"SAMLart": message,
-                                      "RelayState": relay_state})
+            query = urlencode({"SAMLart": message,
+                               "RelayState": relay_state})
         else:
-            query = urllib.urlencode({"SAMLart": message})
+            query = urlencode({"SAMLart": message})
         info = {
             "data": "",
             "url": "%s?%s" % (destination, query)
@@ -280,9 +303,13 @@ class HTTPBase(object):
 
     @staticmethod
     def use_http_uri(message, typ, destination="", relay_state=""):
+        if "\n" in message:
+            data = message.split("\n")[1]
+        else:
+            data = message.strip()
         if typ == "SAMLResponse":
             info = {
-                "data": message.split("\n")[1],
+                "data": data,
                 "headers": [
                     ("Content-Type", "application/samlassertion+xml"),
                     ("Cache-Control", "no-cache, no-store"),
@@ -292,10 +319,10 @@ class HTTPBase(object):
         elif typ == "SAMLRequest":
             # msg should be an identifier
             if relay_state:
-                query = urllib.urlencode({"ID": message,
-                                          "RelayState": relay_state})
+                query = urlencode({"ID": message,
+                                   "RelayState": relay_state})
             else:
-                query = urllib.urlencode({"ID": message})
+                query = urlencode({"ID": message})
             info = {
                 "data": "",
                 "url": "%s?%s" % (destination, query)
@@ -305,7 +332,8 @@ class HTTPBase(object):
 
         return info
 
-    def use_soap(self, request, destination="", soap_headers=None, sign=False):
+    def use_soap(self, request, destination="", soap_headers=None, sign=False,
+                 **kwargs):
         """
         Construct the necessary information for using SOAP+POST
 
@@ -319,7 +347,7 @@ class HTTPBase(object):
 
         soap_message = make_soap_enveloped_saml_thingy(request, soap_headers)
 
-        logger.debug("SOAP message: %s" % soap_message)
+        logger.debug("SOAP message: %s", soap_message)
 
         if sign and self.sec:
             _signed = self.sec.sign_statement(soap_message,
@@ -346,12 +374,12 @@ class HTTPBase(object):
             args = self.use_soap(request, destination, headers, sign)
             args["headers"] = dict(args["headers"])
             response = self.send(**args)
-        except Exception, exc:
-            logger.info("HTTPClient exception: %s" % (exc,))
+        except Exception as exc:
+            logger.info("HTTPClient exception: %s", exc)
             raise
 
         if response.status_code == 200:
-            logger.info("SOAP response: %s" % response.text)
+            logger.info("SOAP response: %s", response.text)
             return response
         else:
             raise HTTPError("%d:%s" % (response.status_code, response.content))
@@ -362,7 +390,7 @@ class HTTPBase(object):
 
     @staticmethod
     def use_http_get(message, destination, relay_state,
-                     typ="SAMLRequest", sigalg="", key=None, **kwargs):
+                     typ="SAMLRequest", sigalg="", signer=None, **kwargs):
         """
         Send a message using GET, this is the HTTP-Redirect case so
         no direct response is expected to this request.
@@ -371,12 +399,13 @@ class HTTPBase(object):
         :param destination:
         :param relay_state:
         :param typ: Whether a Request, Response or Artifact
-        :param sigalg: The signature algorithm to use.
-        :param key: Key to use for signing
+        :param sigalg: Which algorithm the signature function will use to sign
+            the message
+        :param signer: A signing function that can be used to sign the message
         :return: dictionary
         """
-        if not isinstance(message, basestring):
+        if not isinstance(message, six.string_types):
             message = "%s" % (message,)
 
         return http_redirect_message(message, destination, relay_state, typ,
-                                     sigalg, key)
+                                     sigalg, signer)

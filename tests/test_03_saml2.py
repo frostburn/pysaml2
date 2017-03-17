@@ -17,6 +17,7 @@ except ImportError:
         import cElementTree as ElementTree
     except ImportError:
         from elementtree import ElementTree
+from defusedxml.common import EntitiesForbidden
 
 ITEMS = {
     NameID: ["""<?xml version="1.0" encoding="utf-8"?>
@@ -166,11 +167,24 @@ def test_create_class_from_xml_string_wrong_class_spec():
     assert kl == None
 
 
+def test_create_class_from_xml_string_xxe():
+    xml = """<?xml version="1.0"?>
+    <!DOCTYPE lolz [
+    <!ENTITY lol "lol">
+    <!ELEMENT lolz (#PCDATA)>
+    <!ENTITY lol1 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+    ]>
+    <lolz>&lol1;</lolz>
+    """
+    with raises(EntitiesForbidden) as err:
+        create_class_from_xml_string(NameID, xml)
+
+
 def test_ee_1():
     ee = saml2.extension_element_from_string(
         """<?xml version='1.0' encoding='UTF-8'?><foo>bar</foo>""")
     assert ee != None
-    print ee.__dict__
+    print(ee.__dict__)
     assert ee.attributes == {}
     assert ee.tag == "foo"
     assert ee.namespace == None
@@ -182,7 +196,7 @@ def test_ee_2():
     ee = saml2.extension_element_from_string(
         """<?xml version='1.0' encoding='UTF-8'?><foo id="xyz">bar</foo>""")
     assert ee != None
-    print ee.__dict__
+    print(ee.__dict__)
     assert ee.attributes == {"id": "xyz"}
     assert ee.tag == "foo"
     assert ee.namespace == None
@@ -196,7 +210,7 @@ def test_ee_3():
         <foo xmlns="urn:mace:example.com:saml:ns" 
         id="xyz">bar</foo>""")
     assert ee != None
-    print ee.__dict__
+    print(ee.__dict__)
     assert ee.attributes == {"id": "xyz"}
     assert ee.tag == "foo"
     assert ee.namespace == "urn:mace:example.com:saml:ns"
@@ -210,7 +224,7 @@ def test_ee_4():
         <foo xmlns="urn:mace:example.com:saml:ns">
         <id>xyz</id><bar>tre</bar></foo>""")
     assert ee != None
-    print ee.__dict__
+    print(ee.__dict__)
     assert ee.attributes == {}
     assert ee.tag == "foo"
     assert ee.namespace == "urn:mace:example.com:saml:ns"
@@ -221,7 +235,7 @@ def test_ee_4():
     ids = ee.find_children("id", "urn:mace:example.com:saml:ns")
     assert ids != []
     cid = ids[0]
-    print cid.__dict__
+    print(cid.__dict__)
     assert cid.attributes == {}
     assert cid.tag == "id"
     assert cid.namespace == "urn:mace:example.com:saml:ns"
@@ -241,7 +255,7 @@ def test_ee_5():
     ee.children.append(ce)
 
     assert ee != None
-    print ee.__dict__
+    print(ee.__dict__)
     assert ee.attributes == {}
     assert ee.tag == "foo"
     assert ee.namespace == "urn:mace:example.com:saml:ns"
@@ -249,7 +263,7 @@ def test_ee_5():
     assert ee.text.strip() == "bar"
 
     c = ee.children[0]
-    print c.__dict__
+    print(c.__dict__)
 
     child = ee.find_children(namespace="urn:mace:example.com:saml:cu")
     assert len(child) == 1
@@ -259,7 +273,7 @@ def test_ee_5():
     assert len(child) == 1
     child = ee.find_children("edugain", "urn:mace:example.com:saml:cu")
     assert len(child) == 0
-    print ee.to_string()
+    print(ee.to_string())
 
 
 def test_ee_6():
@@ -277,7 +291,7 @@ def test_ee_6():
     pee = saml2._extension_element_from_element_tree(et)
 
     assert pee != None
-    print pee.__dict__
+    print(pee.__dict__)
     assert pee.attributes == {}
     assert pee.tag == "foo"
     assert pee.namespace == "urn:mace:example.com:saml:ns"
@@ -285,7 +299,7 @@ def test_ee_6():
     assert pee.text.strip() == "bar"
 
     c = pee.children[0]
-    print c.__dict__
+    print(c.__dict__)
 
     child = pee.find_children(namespace="urn:mace:example.com:saml:cu")
     assert len(child) == 1
@@ -295,7 +309,7 @@ def test_ee_6():
     assert len(child) == 1
     child = pee.find_children("edugain", "urn:mace:example.com:saml:cu")
     assert len(child) == 0
-    print pee.to_string()
+    print(pee.to_string())
 
 
 NAMEID_WITH_ATTRIBUTE_EXTENSION = """<?xml version="1.0" encoding="utf-8"?>
@@ -312,7 +326,7 @@ NAMEID_WITH_ATTRIBUTE_EXTENSION = """<?xml version="1.0" encoding="utf-8"?>
 def test_nameid_with_extension():
     kl = create_class_from_xml_string(NameID, NAMEID_WITH_ATTRIBUTE_EXTENSION)
     assert kl != None
-    print kl.__dict__
+    print(kl.__dict__)
     assert kl.format == "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"
     assert kl.sp_provided_id == "sp provided id"
     assert kl.text.strip() == "roland@example.com"
@@ -346,7 +360,7 @@ def test_subject_confirmation_with_extension():
     kl = create_class_from_xml_string(SubjectConfirmation,
                                       SUBJECT_CONFIRMATION_WITH_MEMBER_EXTENSION)
     assert kl != None
-    print kl.__dict__
+    print(kl.__dict__)
     assert kl.extension_attributes == {}
     assert kl.method == "urn:oasis:names:tc:SAML:2.0:cm:bearer"
     name_id = kl.name_id
@@ -376,8 +390,8 @@ def test_to_fro_string_1():
     txt = kl.to_string()
     cpy = create_class_from_xml_string(SubjectConfirmation, txt)
 
-    print kl.__dict__
-    print cpy.__dict__
+    print(kl.__dict__)
+    print(cpy.__dict__)
 
     assert kl.text.strip() == cpy.text.strip()
     assert _eq(kl.keyswv(), cpy.keyswv())
@@ -405,7 +419,7 @@ def test_make_vals_list_of_strs():
 def test_attribute_element_to_extension_element():
     attr = create_class_from_xml_string(Attribute, saml2_data.TEST_ATTRIBUTE)
     ee = saml2.element_to_extension_element(attr)
-    print ee.__dict__
+    print(ee.__dict__)
     assert ee.tag == "Attribute"
     assert ee.namespace == 'urn:oasis:names:tc:SAML:2.0:assertion'
     assert _eq(ee.attributes.keys(), ['FriendlyName', 'Name', 'NameFormat'])
@@ -436,7 +450,7 @@ def test_ee_7():
    </ExternalEntityAttributeAuthority>
 """)
 
-    print ee.__dict__
+    print(ee.__dict__)
     assert len(ee.children) == 2
     for child in ee.children:
         assert child.namespace == "urn:oasis:names:tc:SAML:metadata:dynamicsaml"
@@ -452,6 +466,19 @@ def test_ee_7():
     assert len(nid.children) == 0
     assert _eq(nid.attributes.keys(), ["Format"])
     assert nid.text.strip() == "http://federationX.org"
+
+
+def test_ee_xxe():
+    xml = """<?xml version="1.0"?>
+    <!DOCTYPE lolz [
+    <!ENTITY lol "lol">
+    <!ELEMENT lolz (#PCDATA)>
+    <!ENTITY lol1 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+    ]>
+    <lolz>&lol1;</lolz>
+    """
+    with raises(EntitiesForbidden):
+        saml2.extension_element_from_string(xml)
 
 
 def test_extension_element_loadd():
@@ -479,7 +506,7 @@ def test_extension_element_loadd():
     }
 
     ee = saml2.ExtensionElement(ava["tag"]).loadd(ava)
-    print ee.__dict__
+    print(ee.__dict__)
     assert len(ee.children) == 2
     for child in ee.children:
         assert child.namespace == "urn:oasis:names:tc:SAML:metadata:dynamicsaml"
@@ -529,7 +556,7 @@ def test_extensions_loadd():
     extension = saml2.SamlBase()
     extension.loadd(ava)
 
-    print extension.__dict__
+    print(extension.__dict__)
     assert len(extension.extension_elements) == 1
     ee = extension.extension_elements[0]
     assert len(ee.children) == 2
@@ -548,5 +575,5 @@ def test_extensions_loadd():
     assert _eq(nid.attributes.keys(), ["Format"])
     assert nid.text.strip() == "http://federationX.org"
 
-    assert extension.extension_attributes.keys() == ["foo"]
+    assert list(extension.extension_attributes.keys()) == ["foo"]
     assert extension.extension_attributes["foo"] == "bar"

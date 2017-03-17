@@ -1,6 +1,6 @@
 from contextlib import closing
-from urlparse import parse_qs
-from urlparse import urlparse
+from six.moves.urllib.parse import parse_qs
+from six.moves.urllib.parse import urlparse
 from saml2.authn_context import INTERNETPROTOCOLPASSWORD
 from saml2.samlp import AuthnRequest
 from saml2.samlp import NameIDPolicy
@@ -107,5 +107,5 @@ def test_basic_flow():
 
         final = sp.parse_assertion_id_request_response(xmlstr, binding)
 
-        print final.response
+        print(final.response)
         assert isinstance(final.response, Assertion)

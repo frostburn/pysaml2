@@ -84,6 +84,17 @@ class TestIdentifier():
 
         assert id == "foobar"
 
+    def test_persistent_2(self):
+        userid = 'foobar'
+        nameid1 = self.id.persistent_nameid(userid, sp_name_qualifier="sp1",
+                                            name_qualifier="name0")
+
+        nameid2 = self.id.persistent_nameid(userid, sp_name_qualifier="sp1",
+                                            name_qualifier="name0")
+
+        # persistent NameIDs should be _persistent_ :-)
+        assert nameid1 == nameid2
+
     def test_transient_1(self):
         policy = Policy({
             "default": {
@@ -114,18 +125,18 @@ class TestIdentifier():
         })
 
         name_id_policy = samlp.name_id_policy_from_string(NAME_ID_POLICY_1)
-        print name_id_policy
+        print(name_id_policy)
         nameid = self.id.construct_nameid("foobar", policy,
                                           'http://vo.example.org/biomed',
                                           name_id_policy)
 
-        print nameid
+        print(nameid)
         assert _eq(nameid.keyswv(), ['text', 'sp_name_qualifier', 'format',
                                      'name_qualifier'])
         assert nameid.sp_name_qualifier == 'http://vo.example.org/biomed'
         assert nameid.format == NAMEID_FORMAT_PERSISTENT
-        # we want to keep the user identifier in the nameid node
-        assert nameid.text == "foobar"
+        # we want to *NOT* keep the user identifier in the nameid node
+        assert nameid.text != "foobar"
 
     def test_vo_2(self):
         policy = Policy({
@@ -155,7 +166,7 @@ class TestIdentifier():
         sp_id = "urn:mace:umu.se:sp"
         nameid = self.id.persistent_nameid("abcd0001", sp_id)
         remote_id = nameid.text.strip()
-        print remote_id
+        print(remote_id)
         local = self.id.find_local_id(nameid)
         assert local == "abcd0001"
 
@@ -167,7 +178,7 @@ class TestIdentifier():
         sp_id = "urn:mace:umu.se:sp"
         nameid = self.id.transient_nameid("abcd0001", sp_id)
         remote_id = nameid.text.strip()
-        print remote_id
+        print(remote_id)
         local = self.id.find_local_id(nameid)
         assert local == "abcd0001"
 

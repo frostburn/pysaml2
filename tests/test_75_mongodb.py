@@ -1,5 +1,6 @@
 from contextlib import closing
-from pymongo.errors import ConnectionFailure
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
+import pytest
 from saml2 import BINDING_HTTP_POST
 from saml2.authn_context import INTERNETPROTOCOLPASSWORD
 from saml2.client import Saml2Client
@@ -19,6 +20,7 @@ def _eq(l1, l2):
     return set(l1) == set(l2)
 
 
+@pytest.mark.mongo
 def test_flow():
     sp = Saml2Client(config_file="servera_conf")
     try:
@@ -63,29 +65,34 @@ def test_flow():
         pass
 
 
+@pytest.mark.mongo
 def test_eptid_mongo_db():
     try:
         edb = EptidMDB("secret", "idp")
     except ConnectionFailure:
         pass
     else:
-        e1 = edb.get("idp_entity_id", "sp_entity_id", "user_id",
-                     "some other data")
-        print e1
-        assert e1.startswith("idp_entity_id!sp_entity_id!")
-        e2 = edb.get("idp_entity_id", "sp_entity_id", "user_id",
-                     "some other data")
-        assert e1 == e2
+        try:
+            e1 = edb.get("idp_entity_id", "sp_entity_id", "user_id",
+                         "some other data")
+        except ServerSelectionTimeoutError:
+            pass
+        else:
+            print(e1)
+            assert e1.startswith("idp_entity_id!sp_entity_id!")
+            e2 = edb.get("idp_entity_id", "sp_entity_id", "user_id",
+                         "some other data")
+            assert e1 == e2
 
-        e3 = edb.get("idp_entity_id", "sp_entity_id", "user_2",
-                     "some other data")
-        print e3
-        assert e1 != e3
+            e3 = edb.get("idp_entity_id", "sp_entity_id", "user_2",
+                         "some other data")
+            print(e3)
+            assert e1 != e3
 
-        e4 = edb.get("idp_entity_id", "sp_entity_id2", "user_id",
-                     "some other data")
-        assert e4 != e1
-        assert e4 != e3
+            e4 = edb.get("idp_entity_id", "sp_entity_id2", "user_id",
+                         "some other data")
+            assert e4 != e1
+            assert e4 != e3
 
 
 
